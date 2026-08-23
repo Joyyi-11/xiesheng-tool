@@ -1,11 +1,21 @@
-r"""Quick re-run: transcribe + LLM process from existing audio.
+r"""Quick re-run from existing audio (thin wrapper over the main pipeline).
+
+This exists for convenience during development/iteration: given an episode URL
+and an already-converted 16k mono WAV, it re-runs the whole ``xiesheng``
+pipeline while skipping download and re-conversion.
+
+It now delegates entirely to ``src.main`` with ``--audio``, so the two entry
+points never drift. Anything this script could express is covered by:
+
+    xiesheng <url> --audio <existing.wav> [extra flags...]
 
 Usage:
-    python -m src.quick_reprocess <xiaoyuzhou-url>
+    python -m src.quick_reprocess <xiaoyuzhou-url> --audio <existing.wav>
 """
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -24,80 +34,38 @@ logging.basicConfig(
 logger = logging.getLogger("quick-reprocess")
 
 OUTPUT_DIR = Path(__file__).parent.parent / "output"
-AUDIO_WAV = OUTPUT_DIR / "podcast_audio.wav"
+DEFAULT_AUDIO_WAV = OUTPUT_DIR / "podcast_audio.wav"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="使用已有音频重新转录和整理")
     parser.add_argument("url", help="小宇宙播客单集链接")
-    parser.add_argument("--audio", type=Path, default=AUDIO_WAV, help="已有 WAV 音频路径")
+    parser.add_argument("--audio", type=Path, default=DEFAULT_AUDIO_WAV, help="已有 WAV 音频路径")
     parser.add_argument("--model", default="medium", choices=["tiny", "base", "small", "medium", "large-v3"])
     parser.add_argument("--llm-provider", default="qwen", choices=["qwen", "deepseek"])
     parser.add_argument("--llm-model", help="覆盖提供方的默认模型")
+    parser.add_argument("--jobs", type=int, default=min(4, max(1, (os.cpu_count() or 4) // 4)), help="并行转录进程数")
     args = parser.parse_args()
 
     if not args.audio.exists():
         print(f"错误：找不到音频文件 {args.audio}", file=sys.stderr)
         sys.exit(1)
 
-    # --- Step 1: Transcribe (skip diarization to avoid OOM) ---
-    logger.info("转录中...")
-    from src.audio import get_duration_seconds
-    from src.transcriber.local import LocalTranscriber
+    # 复用主流程，避免两个入口逻辑漂移
+    from src.main import main as xiesheng_main
 
-    duration_sec = get_duration_seconds(args.audio)
-    transcriber = LocalTranscriber(model_size=args.model)
-    transcript = transcriber.transcribe(args.audio, duration_sec)
-    print(f"  → 转录完成：{len(transcript.raw_text)} 字")
-
-    # Use raw transcript directly (no diarization)
-    transcript_text = transcript.raw_text
-
-    # --- Step 2: LLM Process ---
-    logger.info("DeepSeek 后处理中...")
-    from src.config import get_llm_config
-    from src.processor import llm_processor
-
-    llm_config = get_llm_config(args.llm_provider, args.llm_model)
-    if not llm_config.api_key:
-        print("错误：LLM_API_KEY 未设置", file=sys.stderr)
-        sys.exit(1)
-
-    # Scrape episode metadata for show_notes
-    from src.scraper.xiaoyuzhou import scrape_episode
-
-    episode = scrape_episode(args.url)
-
-    doc, inp_tok, out_tok = llm_processor.process(
-        llm_config.api_key,
-        episode.title,
-        episode.podcast_name,
-        episode.pub_date,
-        episode.show_notes,
-        transcript_text,
-        base_url=llm_config.base_url,
-        provider=llm_config.provider,
-        model=llm_config.model,
-        work_dir=OUTPUT_DIR / ".work" / "quick_reprocess",
-    )
-
-    # --- Step 3: Write output ---
-    from src.main import build_output_markdown
-    from src.utils import safe_filename
-
-    md_content = build_output_markdown(doc)
-    safe_name = safe_filename(episode.title)
-    output_path = OUTPUT_DIR / f"{safe_name}.md"
-    output_path.write_text(md_content, encoding="utf-8")
-
-    print(f"\n{'='*50}")
-    print("[OK] 完成！")
-    print(f"  输出文件: {output_path}")
-    print(f"  输入 token: {inp_tok:,}")
-    print(f"  输出 token: {out_tok:,}")
-    print(f"  要点数: {len(doc.key_points)}")
-    print(f"  闪光语句: {len(doc.highlight_quotes)}")
-    print(f"{'='*50}")
+    logger.info("委托主流程 xiesheng 处理（--audio 模式）...")
+    sys.argv = [
+        "xiesheng",
+        args.url,
+        "--audio", str(args.audio),
+        "--model", args.model,
+        "--llm-provider", args.llm_provider,
+    ]
+    if args.llm_model:
+        sys.argv += ["--llm-model", args.llm_model]
+    sys.argv += ["--jobs", str(args.jobs)]
+    xiesheng_main()
 
 
 if __name__ == "__main__":

@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DEFAULT_LLM_BASE_URL = "https://voltapi.ai/v1"
 DEFAULT_LLM_PROVIDER = "qwen"
 LLM_MODELS = {
     "qwen": "qwen3.7-plus",
@@ -19,14 +18,28 @@ class LLMConfig:
     base_url: str
     provider: str
     model: str
+    fallback_models: tuple[str, ...] = ()  # ordered extra candidates, tried after `model`
 
 
-def get_xunfei_config() -> dict:
-    return {
-        "app_id": os.getenv("XUNFEI_APP_ID", ""),
-        "api_key": os.getenv("XUNFEI_API_KEY", ""),
-        "api_secret": os.getenv("XUNFEI_API_SECRET", ""),
-    }
+def llm_configured() -> bool:
+    """Whether an LLM API is configured (needs both key and endpoint)."""
+    return bool(os.getenv("LLM_API_KEY")) and bool(os.getenv("LLM_BASE_URL"))
+
+
+def parse_model_candidates(model: str | None) -> tuple[str, ...]:
+    """Split a comma-separated model spec into ordered, deduped candidates.
+
+    ``"--llm-model qwen3.7-plus,gpt-5.2"`` yields ``("qwen3.7-plus", "gpt-5.2")``.
+    Empty/whitespace input yields ``()``.
+    """
+    if not model:
+        return ()
+    seen: list[str] = []
+    for part in model.split(","):
+        name = part.strip()
+        if name and name not in seen:
+            seen.append(name)
+    return tuple(seen)
 
 
 def get_llm_config(
@@ -36,22 +49,12 @@ def get_llm_config(
     if provider not in LLM_MODELS:
         supported = ", ".join(sorted(LLM_MODELS))
         raise ValueError(f"Unsupported LLM provider: {provider}. Choose from: {supported}")
+    candidates = parse_model_candidates(model)
+    primary = candidates[0] if candidates else LLM_MODELS[provider]
     return LLMConfig(
         api_key=os.getenv("LLM_API_KEY", ""),
-        base_url=os.getenv("LLM_BASE_URL", DEFAULT_LLM_BASE_URL).rstrip("/"),
+        base_url=os.getenv("LLM_BASE_URL", "").rstrip("/"),
         provider=provider,
-        model=model or LLM_MODELS[provider],
+        model=primary,
+        fallback_models=candidates[1:],
     )
-
-
-def check_config() -> list[str]:
-    missing = []
-    if not get_xunfei_config()["app_id"]:
-        missing.append("XUNFEI_APP_ID")
-    if not get_xunfei_config()["api_key"]:
-        missing.append("XUNFEI_API_KEY")
-    if not get_xunfei_config()["api_secret"]:
-        missing.append("XUNFEI_API_SECRET")
-    if not os.getenv("LLM_API_KEY"):
-        missing.append("LLM_API_KEY")
-    return missing

@@ -13,8 +13,9 @@ dependencies = [
     "python-dotenv>=1.0",
     "openai>=1.0",
     "pydantic>=2.0",
-    "faster-whisper>=1.0",
-    "ctranslate2==4.6.0",
+    # funasr 依赖 torch；无 GPU 的机器建议先安装 CPU 版 torch 再装本项目：
+    #   pip install torch --index-url https://download.pytorch.org/whl/cpu
+    "funasr>=1.0",
     "diarize>=0.1.2",
 ]
 
@@ -31,6 +32,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*.py" = ["N"]
 "src/processor/prompt.py" = ["E501"]
+"src/processor/session_edit.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]

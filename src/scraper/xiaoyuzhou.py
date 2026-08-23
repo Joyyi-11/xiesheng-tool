@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -25,6 +26,38 @@ HEADERS = {
 EPISODE_URL_PATTERN = re.compile(r"https?://(?:www\.)?xiaoyuzhoufm\.com/episode/([a-zA-Z0-9]+)")
 
 
+def _get_with_retry(url, headers=None, timeout=30, max_attempts=3, base_delay=1.0):
+    """GET with exponential backoff for transient network errors.
+
+    小宇宙偶发 SSL/连接瞬时错误（如 (generated) UNEXPECTED_EOF / 连接重置），
+    重试即可，避免一次白跑整期。仅对网络层异常重试；HTTP 4xx/5xx 由调用方
+    的 raise_for_status 处理（不重试，属页面结构问题而非瞬时故障）。
+    """
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.SSLError,
+            requests.exceptions.ChunkedEncodingError,
+        ) as exc:
+            last_exc = exc
+            if attempt < max_attempts:
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "抓取瞬时失败（第 %d/%d 次）：%s；%.1fs 后重试",
+                    attempt, max_attempts, exc, delay,
+                )
+                time.sleep(delay)
+            else:
+                logger.error("抓取重试 %d 次仍失败: %s", max_attempts, exc)
+    raise last_exc
+
+
 def parse_episode_id(url: str) -> str:
     """Extract episode ID from a Xiaoyuzhou URL."""
     m = EPISODE_URL_PATTERN.search(url)
@@ -38,9 +71,8 @@ def scrape_episode(url: str) -> EpisodeInfo:
     eid = parse_episode_id(url)
     logger.info("Scraping episode %s from %s", eid, url)
 
-    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp = _get_with_retry(url, headers=HEADERS, timeout=30)
     resp.encoding = "utf-8"
-    resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -132,25 +164,6 @@ def _get_meta_content(soup: BeautifulSoup, property_name: str) -> str | None:
         tag = soup.find("meta", attrs={attr: property_name})
         if tag and tag.get("content"):
             return tag["content"].strip()
-    return None
-
-
-def _find_audio_from_json_ld(soup: BeautifulSoup) -> str | None:
-    """Try to find audio URL from JSON-LD script blocks."""
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(script.string)
-            if isinstance(data, list):
-                for item in data:
-                    url = _extract_audio_from_ld(item)
-                    if url:
-                        return url
-            else:
-                url = _extract_audio_from_ld(data)
-                if url:
-                    return url
-        except (json.JSONDecodeError, TypeError):
-            continue
     return None
 
 

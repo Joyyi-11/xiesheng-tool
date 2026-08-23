@@ -30,6 +30,29 @@ class KeyPoint:
 
 
 @dataclass
+class Highlight:
+    """A verbatim quote enriched with its location in the episode."""
+    content: str
+    start_sec: float | None = None
+    speaker: str = ""
+
+
+@dataclass
+class Keyword:
+    """A single keyword with a short explanation."""
+    key: str
+    desc: str = ""
+
+
+@dataclass
+class OutlineItem:
+    """A hierarchical outline node: a topic (optionally with start time) and sub-points."""
+    title: str
+    points: list[str] = field(default_factory=list)
+    start_sec: float | None = None
+
+
+@dataclass
 class OutputDoc:
     """Final structured output document."""
     title: str
@@ -39,6 +62,9 @@ class OutputDoc:
     key_points: list[KeyPoint]
     highlight_quotes: list[str] = field(default_factory=list)
     full_text: str = ""  # cleaned and formatted full transcript (Markdown)
-    speaker_intro: str = ""  # speaker introduction from Show Notes (Markdown blockquote)
+    speaker_intro: str = ""  # speaker introduction from Show Notes (Markdown)
+    highlights: list[Highlight] = field(default_factory=list)  # quotes with timestamp/speaker
+    keywords: list[Keyword] = field(default_factory=list)
+    outline: list[OutlineItem] = field(default_factory=list)  # hierarchical content outline (mindmap)
     costs: dict = field(default_factory=dict)  # {"transcription": 0.0, "llm": 0.0}
     timings: dict = field(default_factory=dict)  # {"scrape": 0, "transcribe": 0, "process": 0}

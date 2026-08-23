@@ -3,14 +3,23 @@
 
 # 输出目录
 output/*.md
+output/*.md.bak
 output/*.txt
 output/podcast_audio.*
 output/.work/
+output/_*
+output/*.log
+output/*.err
+output/**/*.txt
+output/**/.work/
+output/**/result_cache.json
+output/lark-*
 
-# Local transcribe.cpp benchmark binaries, models, audio, and raw results
-benchmark/transcribe_cpp/assets/
-benchmark/transcribe_cpp/results/
-benchmark/llm_ab/results/
+# 工具记忆
+.workbuddy/
+
+# 本地缓存（pip / modelscope 模型下载缓存，可重生）
+.cache/
 
 # Python
 __pycache__/
@@ -20,6 +29,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.venv/
+.venv311/
 
 # 临时音频
 *.wav
@@ -33,3 +44,10 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# benchmark 分析中间产物（仅忽略大体积运行日志，脚本与对比报告入库）
+benchmark/**/data/**/b_run.log
+
+# vol74 选型对比：运行日志与 PoC 脚本含本地绝对路径与播客期号，不提交（本地文件保留）
+benchmark/vol74-asr-comparison/logs/
+benchmark/vol74-asr-comparison/scripts/_run_asr.py

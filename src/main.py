@@ -3,10 +3,12 @@
 Usage:
     xiesheng https://www.xiaoyuzhoufm.com/episode/xxx
     xiesheng https://www.xiaoyuzhoufm.com/episode/xxx -o output/
+    xiesheng url1 url2 url3 -o output/   # 多期：模型只加载一次，逐期转录
 """
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -19,8 +21,11 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 
 from src.audio import convert_to_wav, download_audio, get_duration_seconds
 from src.config import DEFAULT_LLM_PROVIDER, LLM_MODELS, get_llm_config
-from src.models.schemas import OutputDoc
+from src.models.schemas import EpisodeInfo
 from src.processor import llm_processor
+from src.processor.normalize import normalize_quotes
+from src.renderer.markdown import build_output_markdown
+from src.result_cache import find_cached_markdown, record_result
 from src.scraper.xiaoyuzhou import scrape_episode
 from src.utils import CostTracker, Timer, fmt_time, safe_filename
 
@@ -32,89 +37,79 @@ logging.basicConfig(
 logger = logging.getLogger("xiesheng")
 
 
-def build_output_markdown(doc: OutputDoc) -> str:
-    """Build the final markdown document."""
+def build_session_doc(episode: EpisodeInfo, transcript_text: str) -> str:
+    """Build a self-contained, speaker-labeled transcript for in-session post-processing.
+
+    The --no-llm path produces this instead of the API path. It embeds episode
+    metadata and Show Notes so the whole file can be pasted directly into an AI
+    chat session for cleaning and structuring (speaker->name mapping, key points...).
+    """
     lines = [
-        f"# {doc.title}",
+        f"# {episode.title}",
         "",
-        f"> 来源：{doc.podcast_name}  |  {doc.pub_date}",
+        f"> 来源：{episode.podcast_name}  |  {episode.pub_date}",
+        "",
+        "# Show Notes",
+        "",
+        episode.show_notes or "（无）",
+        "",
+        "# 转录全文（带说话人标签）",
+        "",
+        transcript_text,
     ]
-    if doc.show_notes:
-        lines += ["", "# Show Notes", "", doc.show_notes]
-
-    lines += ["", "## 内容提要", ""]
-    for kp in doc.key_points:
-        evidence = f"：{kp.evidence}" if kp.evidence else ""
-        lines.append(f"- **{kp.point}**{evidence}")
-
-    if doc.highlight_quotes:
-        lines += ["", "## 闪光语句", ""]
-        for q in doc.highlight_quotes:
-            lines.append(f"- {q}")
-
-    if doc.speaker_intro:
-        lines += ["", "## 人物简介", "", doc.speaker_intro]
-
-    lines += ["", "## 全文转录", "", doc.full_text]
     return "\n".join(lines)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="撷声 - 输入小宇宙播客单集链接，输出结构化 Markdown 文稿"
-    )
-    parser.add_argument("url", help="小宇宙播客单集链接")
-    parser.add_argument("-o", "--output", default="output", help="输出目录 (默认: output/)")
-    parser.add_argument("--model", default="medium", choices=["tiny", "base", "small", "medium", "large-v3"],
-                        help="Whisper 模型大小 (默认: medium)")
-    parser.add_argument("--llm-provider", default=DEFAULT_LLM_PROVIDER, choices=sorted(LLM_MODELS),
-                        help="LLM 后处理提供方 (默认: qwen)")
-    parser.add_argument("--llm-model", help="覆盖提供方的默认模型")
-    parser.add_argument("--no-llm", action="store_true", help="仅转录，不进行 LLM 后处理")
-    parser.add_argument("--no-diarization", action="store_true", help="跳过说话人日志，不区分说话人")
-    parser.add_argument("--speakers", type=int, help="已知说话人数；默认自动检测")
-    args = parser.parse_args()
+def process_episode(url, args, output_dir, tracker, transcriber, audio_override, llm_config) -> bool:
+    """处理单个单集：抓取→下载→转录→整理。
 
-    llm_config = get_llm_config(args.llm_provider, args.llm_model)
-    if not args.no_llm and not llm_config.api_key:
-        print(
-            "错误：LLM_API_KEY 未设置\n"
-            "请设置 Windows 用户环境变量 LLM_API_KEY",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    tracker = CostTracker()
-    timers = {}
-
+    transcriber 在批处理中复用同一实例（模型只加载一次）。audio_override 仅单
+    链接时有效（音频与单集一一对应）。返回 True 表示该期已处理（含降级到会话内
+    链路），False 表示该期失败（批处理会继续下一期，不中断整体）。
+    """
+    timers: dict[str, float] = {}
     try:
         # --- Step 1: Scrape ---
         with Timer() as t:
             logger.info("Step 1/6: 爬取节目信息...")
-            episode = scrape_episode(args.url)
+            episode = scrape_episode(url)
             print(f"  → {episode.title}")
             print(f"  播客: {episode.podcast_name}")
         timers["scrape"] = t.elapsed
 
-        # --- Step 2: Download audio ---
+        # --- Cache short-circuit: same episode already processed ---
+        if not args.refresh:
+            cached_md = find_cached_markdown(output_dir, url, episode.pub_date)
+            if cached_md is not None:
+                print(f"\n[缓存命中] 该单集已处理过，直接返回既有结果: {cached_md}")
+                print("如需重新转录/整理，请加 --refresh")
+                return True
+
+        # --- Step 2: Download audio (or reuse existing WAV) ---
+        safe_name = safe_filename(episode.title)
         with Timer() as t:
-            logger.info("Step 2/6: 下载音频...")
-            audio_file = download_audio(episode.audio_url, output_dir)
-            wav_file = convert_to_wav(audio_file, output_dir)
+            if audio_override is not None:
+                if not audio_override.exists():
+                    raise FileNotFoundError(f"找不到音频文件: {audio_override}")
+                logger.info("Step 2/6: 复用已有音频 %s", audio_override)
+                wav_file = audio_override
+            else:
+                logger.info("Step 2/6: 下载音频...")
+                audio_file = download_audio(episode.audio_url, output_dir, stem=safe_name)
+                wav_file = convert_to_wav(audio_file, output_dir, stem=safe_name)
             duration_sec = get_duration_seconds(wav_file)
             print(f"  → 音频时长: {fmt_time(duration_sec)}")
         timers["download"] = t.elapsed
 
-        # --- Step 3: Transcribe ---
+        # --- Step 3: Transcribe (复用 transcriber，模型只加载一次) ---
         with Timer() as t:
-            from src.transcriber.local import LocalTranscriber
-
-            logger.info("Step 3/6: 本地转录中（faster-whisper %s, CPU）...", args.model)
-            transcriber = LocalTranscriber(model_size=args.model)
-            transcript = transcriber.transcribe(wav_file, duration_sec)
+            logger.info("Step 3/6: 本地转录中（FunASR %s, CPU）...", args.model)
+            transcript = transcriber.transcribe(
+                wav_file,
+                duration_sec,
+                work_dir=output_dir / ".work" / safe_name,
+                jobs=args.jobs,
+            )
             tracker.add_transcription(transcript.cost_yuan)
         timers["transcribe"] = t.elapsed
         char_count = len(transcript.raw_text)
@@ -123,44 +118,133 @@ def main() -> None:
         print(f"  → 转录完成：{char_count} 字, {fmt_time(t.elapsed)}, RTF={rtf:.2f}")
         print(f"  → [估算] 2小时节目约需 {fmt_time(est_2h)}（当前模型: {args.model}）")
 
-        safe_name = safe_filename(episode.title)
         raw_path = output_dir / f"{safe_name}_raw.txt"
         raw_path.write_text(transcript.raw_text, encoding="utf-8")
         logger.info("原始转录已保存到 %s", raw_path)
 
-        if args.no_llm:
-            print(f"\n原始转录已保存到: {raw_path}")
+        # --- Step 4: Speaker Diarization (本地，独立于 LLM) ---
+        # SenseVoice 转写自带说话人标签（spk_model 一站式输出，B 方案）时直接使用，
+        # 无需再跑独立 diarize；Paraformer 路径（无 spk 标签）才回退到独立 diarize。
+        transcript_text = transcript.raw_text
+        labeled_segments: list[dict] | None = None
+        labeled_path = None
+        if not args.no_diarization:
+            with Timer() as t:
+                from src.diarization.speaker_diarization import format_labeled_segments
+
+                has_spk = any(seg.get("speaker") for seg in transcript.segments)
+                if has_spk:
+                    logger.info("Step 4/6: 使用转写自带说话人标签（spk_model）...")
+                    labeled_segments = transcript.segments
+                else:
+                    from src.diarization.speaker_diarization import (
+                        assign_speakers,
+                        run_diarization,
+                    )
+
+                    logger.info("Step 4/6: 说话人日志（Speaker Diarization，独立模块）...")
+                    diarization_segments = run_diarization(wav_file, num_speakers=args.speakers)
+                    labeled_segments = assign_speakers(transcript.segments, diarization_segments)
+                try:
+                    transcript_text = format_labeled_segments(labeled_segments)
+                    labeled_path = output_dir / f"{safe_name}_diarized.txt"
+                    labeled_path.write_text(
+                        build_session_doc(episode, normalize_quotes(transcript_text)),
+                        encoding="utf-8",
+                    )
+                    logger.info("带说话人标签的转录已保存到 %s", labeled_path)
+                except Exception as e:
+                    logger.warning("说话人标签处理失败，跳过: %s", e)
+                    transcript_text = transcript.raw_text
+                    labeled_segments = None
+            timers["diarization"] = t.elapsed
         else:
-            # --- Step 4: Speaker Diarization ---
-            transcript_text = transcript.raw_text
-            if not args.no_diarization:
-                with Timer() as t:
-                    from src.diarization.speaker_diarization import assign_speakers, run_diarization
+            logger.info("已跳过说话人分离（--no-diarization）")
 
-                    logger.info("Step 4/6: 说话人日志（Speaker Diarization）...")
-                    try:
-                        diarization_segments = run_diarization(wav_file, num_speakers=args.speakers)
-                        transcript_text = assign_speakers(transcript.segments, diarization_segments)
-                    except Exception as e:
-                        logger.warning("Diarization 失败，跳过: %s", e)
-                        transcript_text = transcript.raw_text
-                timers["diarization"] = t.elapsed
+        if args.no_llm:
+            # 无 LLM 链路：除会话输入包外，一并产出固定的会话内校订规范提示词，
+            # 使"会话内校订"可直接复制执行，规则保持一致（与自动化链路同口径）。
+            print(f"\n原始转录已保存到: {raw_path}")
+            if labeled_path is not None:
+                print(f"会话输入包（含 Show Notes 与说话人标签）已保存到: {labeled_path}")
+                from src.processor.session_edit import (
+                    build_session_prompt,
+                    SESSION_SPEC_VERSION,
+                )
 
+                prompt_path = output_dir / f"{safe_name}_session_prompt.txt"
+                prompt_path.write_text(
+                    build_session_prompt(labeled_path.read_text(encoding="utf-8")),
+                    encoding="utf-8",
+                )
+                print(f"会话内校订提示词（固定规范 v{SESSION_SPEC_VERSION}）已保存到: {prompt_path}")
+                print("（未启用 LLM；将提示词与包内容一起粘贴到 AI 会话，即可按固定规范完成校订与结构化）")
+                # 会话包也算一次完整结果：缓存命中后重跑同样直接返回，避免重复转录
+                record_result(
+                    output_dir,
+                    url,
+                    episode.pub_date,
+                    labeled_path,
+                    provider="",
+                    model="",
+                )
+            else:
+                print("（未启用 LLM 且未做说话人分离；如需说话人标签，请提供 HF_TOKEN 后重跑）")
+        else:
             # --- Step 5: LLM Process ---
             with Timer() as t:
-                logger.info("Step 5/6: %s/%s 分块校订与整理中...", llm_config.provider, llm_config.model)
-                doc, inp_tok, out_tok = llm_processor.process(
-                    llm_config.api_key,
-                    episode.title,
-                    episode.podcast_name,
-                    episode.pub_date,
-                    episode.show_notes,
-                    transcript_text,
-                    base_url=llm_config.base_url,
-                    provider=llm_config.provider,
-                    model=llm_config.model,
-                    work_dir=output_dir / ".work" / safe_name,
-                )
+                # 先探测网关可用模型并固定，避免 404 白白消耗配额；失败则降级为会话内链路
+                try:
+                    resolved_llm = llm_processor.resolve_llm_config(llm_config)
+                except Exception as exc:
+                    logger.warning("LLM 模型探测失败，降级为会话内链路: %s", exc)
+                    print(
+                        f"\n[降级] 无法确定可用的 LLM 模型（{exc}），"
+                        "本次改走会话内处理链路。",
+                        file=sys.stderr,
+                    )
+                    print(f"原始转录已保存到: {raw_path}")
+                    if labeled_path is not None:
+                        print(f"会话输入包（含 Show Notes 与说话人标签）已保存到: {labeled_path}")
+                        record_result(
+                            output_dir,
+                            url,
+                            episode.pub_date,
+                            labeled_path,
+                            provider="",
+                            model="",
+                        )
+                    return True
+                logger.info("Step 5/6: %s/%s 分块校订与整理中...", resolved_llm.provider, resolved_llm.model)
+                try:
+                    doc, inp_tok, out_tok = llm_processor.process(
+                        episode.title,
+                        episode.podcast_name,
+                        episode.pub_date,
+                        episode.show_notes,
+                        transcript_text,
+                        llm_config=resolved_llm,
+                        work_dir=output_dir / ".work" / safe_name,
+                        segments=labeled_segments,
+                    )
+                except Exception as exc:
+                    logger.warning("LLM 后处理失败，降级为会话内链路: %s", exc)
+                    print(
+                        f"\n[降级] LLM 后处理失败（{exc}），本次改走会话内处理链路。",
+                        file=sys.stderr,
+                    )
+                    print(f"原始转录已保存到: {raw_path}")
+                    if labeled_path is not None:
+                        print(f"会话输入包（含 Show Notes 与说话人标签）已保存到: {labeled_path}")
+                        record_result(
+                            output_dir,
+                            url,
+                            episode.pub_date,
+                            labeled_path,
+                            provider="",
+                            model="",
+                        )
+                    return True
                 tracker.add_llm_usage(inp_tok, out_tok)
             timers["process"] = t.elapsed
 
@@ -175,6 +259,14 @@ def main() -> None:
                 md_content = build_output_markdown(doc)
                 output_path = output_dir / f"{safe_name}.md"
                 output_path.write_text(md_content, encoding="utf-8")
+                record_result(
+                    output_dir,
+                    url,
+                    episode.pub_date,
+                    output_path,
+                    provider=resolved_llm.provider,
+                    model=resolved_llm.model,
+                )
             timers["write"] = t.elapsed
 
             total_time = sum(timers.values())
@@ -187,9 +279,87 @@ def main() -> None:
             print(f"  闪光语句: {len(doc.highlight_quotes)}")
             print(f"{'='*50}")
 
+        return True
+
     except Exception as e:
-        logger.exception("处理失败")
-        print(f"\n错误: {e}", file=sys.stderr)
+        logger.exception("单集处理失败: %s", url)
+        print(f"\n错误（跳过该单集）: {e}", file=sys.stderr)
+        return False
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="撷声 - 输入小宇宙播客单集链接，输出结构化 Markdown 文稿"
+    )
+    parser.add_argument("urls", nargs="+", help="小宇宙播客单集链接（可传多个；模型只加载一次，逐期转录）")
+    parser.add_argument("-o", "--output", default="output", help="输出目录 (默认: output/)")
+    parser.add_argument("--model", default="sensevoice-small", choices=["sensevoice-small", "paraformer-large"],
+                        help="ASR 模型（默认 sensevoice-small；paraformer-large 支持热词与字级时间戳）")
+    parser.add_argument("--llm-provider", default=DEFAULT_LLM_PROVIDER, choices=sorted(LLM_MODELS),
+                        help="LLM 后处理提供方 (默认: qwen)")
+    parser.add_argument("--llm-model",
+                        help="覆盖提供方的默认模型；可用逗号分隔指定多个候选，按顺序回退（如 qwen3.7-plus,gpt-5.2）")
+    parser.add_argument("--no-llm", action="store_true", help="仅转录，不进行 LLM 后处理")
+    parser.add_argument("--no-diarization", action="store_true", help="跳过说话人日志，不区分说话人")
+    parser.add_argument("--speakers", type=int, help="已知说话人数；默认自动检测")
+    parser.add_argument(
+        "--spk-max-seg-ms", type=int, default=4000,
+        help="说话人区分（spk_model）的 VAD 段上限（毫秒）。段越短，两人问答被并成一段的概率越低；"
+             "实验验证档位 8000（882 段 6 人核验正确）；若聚类质量下降可回退 --spk-max-seg-ms 8000",
+    )
+    parser.add_argument("--audio", type=Path, help="复用已存在的 16k mono WAV，跳过下载与转换（仅单链接时有效）")
+    parser.add_argument(
+        "--jobs", type=int, default=1,
+        help="预留参数（FunASR 整段串行转录，暂不使用）",
+    )
+    parser.add_argument(
+        "--refresh", action="store_true",
+        help="忽略结果缓存，强制重新转录与整理",
+    )
+    args = parser.parse_args()
+
+    llm_config = get_llm_config(args.llm_provider, args.llm_model)
+    if not args.no_llm and not llm_config.api_key:
+        print(
+            "未检测到 LLM API Key（LLM_API_KEY / LLM_BASE_URL 未设置），"
+            "自动进入免费会话内处理链路。\n"
+            "如需自动化校订，请配置这两个环境变量后再运行；当前以 --no-llm 继续。",
+            file=sys.stderr,
+        )
+        args.no_llm = True
+
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tracker = CostTracker()
+
+    # 批处理：模型只加载一次，逐期复用同一转写器实例（根治并发争抢 + 省去重复加载）
+    from src.transcriber.funasr_transcriber import FunASRTranscriber
+
+    transcriber = FunASRTranscriber(
+        model_name=args.model,
+        spk_max_seg_ms=args.spk_max_seg_ms,
+    )
+
+    n = len(args.urls)
+    single = n == 1
+    audio_override = args.audio if single else None
+    if args.audio is not None and not single:
+        print("提示：--audio 仅对单链接有效，多链接时忽略。", file=sys.stderr)
+
+    ok_count = 0
+    for i, url in enumerate(args.urls, 1):
+        print(f"\n{'='*60}")
+        print(f"# 第 {i}/{n} 期: {url}")
+        print(f"{'='*60}")
+        if process_episode(url, args, output_dir, tracker, transcriber, audio_override, llm_config):
+            ok_count += 1
+
+    print(f"\n{'='*60}")
+    print(f"[完成] 共 {n} 期，成功 {ok_count} 期，失败 {n - ok_count} 期。")
+    print(f"  总费用: {tracker.summary()}")
+    print(f"{'='*60}")
+    if ok_count < n:
         sys.exit(1)
 
 
