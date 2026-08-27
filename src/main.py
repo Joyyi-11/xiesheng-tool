@@ -291,7 +291,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="撷声 - 输入小宇宙播客单集链接，输出结构化 Markdown 文稿"
     )
-    parser.add_argument("urls", nargs="+", help="小宇宙播客单集链接（可传多个；模型只加载一次，逐期转录）")
+    parser.add_argument("urls", nargs="*", help="小宇宙播客单集链接（可传多个；模型只加载一次，逐期转录；--server 模式可省略）")
     parser.add_argument("-o", "--output", default="output", help="输出目录 (默认: output/)")
     parser.add_argument("--model", default="sensevoice-small", choices=["sensevoice-small", "paraformer-large"],
                         help="ASR 模型（默认 sensevoice-small；paraformer-large 支持热词与字级时间戳）")
@@ -309,14 +309,41 @@ def main() -> None:
     )
     parser.add_argument("--audio", type=Path, help="复用已存在的 16k mono WAV，跳过下载与转换（仅单链接时有效）")
     parser.add_argument(
-        "--jobs", type=int, default=1,
-        help="预留参数（FunASR 整段串行转录，暂不使用）",
+        "--batch-size-s", type=int, default=60,
+        help="FunASR VAD 批切段时长（秒，默认 60）。越大单次送入音频越长、调用次数越少但峰值内存越高；内存紧张默认保守，可在 90/120 间 A/B 验证后上调",
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=2,
+        help="长音频分块并行转写的 worker 进程数（默认 2；内存紧张时自动降档，可用 --jobs 1 回退串行）",
     )
     parser.add_argument(
         "--refresh", action="store_true",
         help="忽略结果缓存，强制重新转录与整理",
     )
+    parser.add_argument(
+        "--server", action="store_true",
+        help="启动常驻转写服务（模型只加载一次，常驻内存；HTTP 接口见 src/server.py）",
+    )
+    parser.add_argument(
+        "--server-port", type=int, default=8765,
+        help="常驻转写服务端口（默认 8765）",
+    )
+    parser.add_argument(
+        "--use-server", metavar="URL",
+        help="走常驻转写服务（如 http://127.0.0.1:8765），不在本进程加载模型",
+    )
     args = parser.parse_args()
+
+    if args.server:
+        from src.server import start_server
+
+        start_server(
+            port=args.server_port,
+            model_name=args.model,
+            spk_max_seg_ms=args.spk_max_seg_ms,
+            batch_size_s=args.batch_size_s,
+        )
+        return
 
     llm_config = get_llm_config(args.llm_provider, args.llm_model)
     if not args.no_llm and not llm_config.api_key:
@@ -331,15 +358,35 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # 运行日志留痕：每次运行写入 output/_run_ep_<url-hash>.log（多期共用首期 hash），
+    # 便于事后核对各阶段耗时与失败原因（此前后台运行无日志，只能靠文件时间戳反推）。
+    if args.urls:
+        import hashlib
+
+        log_hash = hashlib.sha1(args.urls[0].encode("utf-8")).hexdigest()[:8]
+        run_log = output_dir / f"_run_ep_{log_hash}.log"
+        _fh = logging.FileHandler(run_log, encoding="utf-8")
+        _fh.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+        )
+        logging.getLogger().addHandler(_fh)
+
     tracker = CostTracker()
 
-    # 批处理：模型只加载一次，逐期复用同一转写器实例（根治并发争抢 + 省去重复加载）
-    from src.transcriber.funasr_transcriber import FunASRTranscriber
+    # 批处理：模型只加载一次，逐期复用同一转写器实例（根治并发争抢 + 省去重复加载）。
+    # --use-server 时改用常驻服务（HTTP 代理），本进程不加载模型。
+    if args.use_server:
+        from src.server import HttpTranscriber
 
-    transcriber = FunASRTranscriber(
-        model_name=args.model,
-        spk_max_seg_ms=args.spk_max_seg_ms,
-    )
+        transcriber = HttpTranscriber(base_url=args.use_server, model_name=args.model)
+    else:
+        from src.transcriber.funasr_transcriber import FunASRTranscriber
+
+        transcriber = FunASRTranscriber(
+            model_name=args.model,
+            spk_max_seg_ms=args.spk_max_seg_ms,
+            batch_size_s=args.batch_size_s,
+        )
 
     n = len(args.urls)
     single = n == 1
@@ -354,6 +401,9 @@ def main() -> None:
         print(f"{'='*60}")
         if process_episode(url, args, output_dir, tracker, transcriber, audio_override, llm_config):
             ok_count += 1
+
+    # 释放并行转写进程池（worker 内的常驻模型随之退出）
+    transcriber.shutdown()
 
     print(f"\n{'='*60}")
     print(f"[完成] 共 {n} 期，成功 {ok_count} 期，失败 {n - ok_count} 期。")

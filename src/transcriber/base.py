@@ -25,3 +25,7 @@ class Transcriber(ABC):
             jobs: Number of parallel worker processes for long audio.
         """
         ...
+
+    def shutdown(self) -> None:
+        """释放本转写器持有的长期资源（如并行转写进程池）。默认无操作。"""
+        return None

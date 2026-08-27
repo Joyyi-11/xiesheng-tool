@@ -13,18 +13,18 @@
 ## 功能
 
 - 爬取小宇宙播客节目信息、Show Notes
-- 下载音频并转写为文字（本地 FunASR SenseVoice-Small，免费；整段音频串行转录，约 9x 实时）
+- 下载音频并转写为文字（本地 FunASR SenseVoice-Small，免费；整段音频串行转录，本机实测约 3–5x 实时、RTF 0.2–0.33）
 - 千问或 DeepSeek 分块校订：错字修正、口语清理、语义分段、专名纠错（分块并行校订）
 - LLM 模型自动回退：按 `--llm-model` 候选列表（逗号分隔）或网关 `/models` 自动选可用模型，404 `model_not_found` 不再白白重试，过载（429/502/503）指数退避
 - 会话内校订固化：`python -m src.processor.session_edit <episode>_diarized.txt` 输出固定规范提示词，附带结构校验器保证输出格式稳定
-- 独立生成内容提要、人物简介、闪光语句、Mermaid 思维导图大纲和关键词，避免长文输出截断
+- 独立生成摘要、内容提要、闪光语句、问题与思考、关键词等阅读辅助信息，避免长文输出截断
 - 永久保留原始转录，整段音频缓存支持失败后续跑
 - 按模型、来源 hash 和提示词版本隔离缓存，避免失败重跑或改提示词后重复消耗 LLM token
 - 本地 ASR 纯 CPU 运行，无需 GPU
 - 结果缓存：同链接 + 同日期的重复运行直接复用已完成文稿，`--refresh` 强制重跑
 - 支持两种后处理方式：有 API Key 走自动化校订，无 Key 走 `--no-llm` 会话内处理
 - 记录转写耗时、实时系数和 LLM token 用量
-- 输出结构化 Markdown：Show Notes -> 内容提要 -> 闪光语句 -> 大纲 -> 人物简介 -> 全文转录
+- 输出结构化 Markdown：Show Notes → 摘要 → 内容提要 → 闪光语句 → 问题与思考 → 关键词 → 人物简介 → 全文转录
 
 ## 完整链路
 
@@ -33,30 +33,81 @@
 ```text
 输入：小宇宙播客链接
 
-处理：
-   -> 抓取标题 / 来源 / Show Notes / 音频地址
-   -> 下载音频
-   -> FunASR SenseVoice-Small 本地转写，保留原始逐字稿
-   -> 说话人识别，为不同声音添加标签
-   -> LLM 校订
-        ├─ 免费会话链路：生成自包含会话输入包
-        └─ API 自动校订：分块校订 -> 重试/回退
-   -> 内容提炼与 Markdown 组装
-   
-输出：结构化 Markdown 转录文稿
-     标题、来源与时间／Show Notes／内容提要／闪光语句/大纲/思维导图/关键词／人物简介／全文转录       
+① 抓取元信息与音频：抓取标题／来源／Show Notes／音频地址，并下载音频
+② 本地转写：FunASR SenseVoice-Small 本地转写，保留原始逐字稿
+③ 说话人区分：为不同声音添加标签
+④ LLM 分块校订：分块修正错字、口语、专名、分段（会话内链路产出输入包，API 链路自动校订，含重试／回退）
+⑤ 内容提炼：生成摘要、内容提要、闪光语句、问题与思考、关键词等阅读辅助信息
+⑥ Markdown 组装：按固定结构写入
+
+输出：结构化 Markdown 文稿（固定结构）
+Show Notes → 摘要 → 内容提要 → 闪光语句 → 问题与思考 → 关键词 → 人物简介 → 全文转录
 ```
 
 ## 两种后处理链路
 
 校订与结构化可以走自动化 API，也可以交给 AI 会话——后者在 API Key 无余额或想保持完全本地时非常实用。两条链路共用同一份转写与说话人区分结果，只在"后处理"这一步分叉。
 
-- **会话内（默认，免费）**：工具只完成转写与说话人区分，产出"会话输入包"——一份自包含文件，包含节目标题、来源、Show Notes 与带 `[SPEAKER_XX]` 标签的全文。内部处理方式已固化为固定规范（`src/processor/session_edit.py`，v4），规范提示词要求产出与自动化链路相同的完整结构——内容提要、闪光语句、Mermaid 思维导图大纲（一级主题带播放时间）、关键词、人物简介与全文转录——并用内置校验器复核会话产出。未配置 API Key 时自动走此链路。
-- **自动化（可选）**：同时配置 `LLM_API_KEY` 与 `LLM_BASE_URL` 后直接运行，工具按块校订全文，再生成内容提要、人物简介、闪光台词、Mermaid 思维导图大纲和关键词（规则见 `src/processor/prompt.py`）。模型不可用时自动降级为会话内链路。
+- **会话内（默认，免费）**：工具只完成转写与说话人区分，产出"会话输入包"——一份自包含文件，包含节目标题、来源、Show Notes 与带 `[SPEAKER_XX]` 标签的全文。内部处理方式已固化为固定规范（`src/processor/session_edit.py`，v6），规范提示词要求产出与自动化链路相同的完整结构——摘要、内容提要、闪光语句、问题与思考、关键词、人物简介与全文转录——并用内置校验器复核会话产出（含「全文转录 ≥ 原始转录 50%」的信息量硬线）。未配置 API Key 时自动走此链路。
+- **自动化（可选）**：同时配置 `LLM_API_KEY` 与 `LLM_BASE_URL` 后直接运行，工具按块校订全文，再生成摘要、内容提要、闪光语句、问题与思考、关键词和人物简介（规则见 `src/processor/prompt.py`）。模型不可用时自动降级为会话内链路。
+
+## 会话内校订：保真重建与校验
+
+会话内校订（把 `_diarized.txt` 交给 AI 会话处理）最常见的问题是校订时把口语长叙述压缩成概要，触发校验器「全文转录 ≥ 原始转录 50%」的信息量硬线（报「疑似过度删减」）。校订应保留原文全部事例、数字与对话原貌，只做填充词删除、错字修正与分段。
+
+已过度压缩时无需手工重写，用保真重建工具从会话包一键重建全文转录：
+
+```bash
+# 生成完整初稿 .md（标题/来源/Show Notes 取自会话包）
+python -m src.processor.rebuild_transcript output/<节目>_diarized.txt -o output/<节目>.md
+
+# 已知说话人时直接映射（不传则保留 [SPEAKER_XX] 标签，由校订阶段处理）
+python -m src.processor.rebuild_transcript output/<节目>_diarized.txt \
+    --speaker-map "SPEAKER_00:主播 Jean,SPEAKER_01:嘉宾姨姨" -o output/<节目>.md
+
+# 只替换既有 .md 的全文转录段（保留前面已校订的摘要/内容提要等章节）
+python -m src.processor.rebuild_transcript output/<节目>_diarized.txt -o output/<节目>.md --replace-transcript
+```
+
+重建初稿保留 100% 原文信息量（必然 ≥50% 阈值），在此底稿上做填充词清理与纠错即可，不会再触发「过度删减」。
+
+## 批量转录 SOP（10 期批量实测沉淀）
+
+两阶段、两条命令 + 两件人工事。核心原则：**可自动的全部脚本化，不可自动的由幂等脚本列出待办**——任何中断重跑同一条命令即收敛，不依赖「AI 会话跨轮次续跑」。
+
+```bash
+# Phase A：批量转写 + 说话人区分（多 URL 一次跑；内存紧张务必 --jobs 1 防 OOM）
+python -m src.main --no-llm <url1> <url2> ... --jobs 1
+
+# Phase B：幂等续跑（扫描全部 _diarized → 生成缺失初稿、补齐来源行三要素、校验报告）
+python -m src.processor.finish_phase_b --all
+
+# 辅助：说话人画像（每个 [SPEAKER_XX] 的段数/字符数/首段样本，判定映射归属）
+python -m src.processor.finish_phase_b --speaker-preview
+```
+
+**人工步骤（脚本清单之外的待办）**：
+
+1. **说话人映射**：按 `--speaker-preview` 画像 + 内容自述/指称/发言时间线判定身份，用保真重建替换全文转录：
+   ```bash
+   python -m src.processor.rebuild_transcript <包> \
+       --speaker-map "SPEAKER_00:主播xx,SPEAKER_01:嘉宾yy" -o <md> --replace-transcript
+   ```
+2. **上层章节**：摘要/内容提要/闪光语句/问题与思考/关键词/人物简介需人工撰写（生成初稿中为「待校订」占位，脚本据此列出待办清单）。
+
+**经验要点**：
+
+- `--jobs 1` 串行：jobs>1 时主进程与各 worker 各加载全套模型，本机（16GB、页面文件紧张）实测 OOM（BrokenProcessPool）；串行 RTF 0.10–0.16，即 1 小时音频约 8–10 分钟转写。
+- 分块缓存按音频大小命中，重跑收敛：实测同一期三轮耗时 45 分 → 20 分 → 1 分 56 秒（缓存逐步补齐）；同链接重跑不重复转写已完成分块。
+- 音频已存在自动跳过下载；来源行缺「节目标题」中段时 `--fix-source` 自动用标题补齐。
+- 说话人聚类常过碎（2 人节目切出 18–28 个标签），按「自述/指称/发言时间线」归并；无法可靠拆分的混段保留 `[SPEAKER_XX]` 由人工复核（校验器放行，但报告会列出）。
+- 占比硬线：全文转录 ≥ 原始 50%；触发「疑似过度删减」时用 `rebuild_transcript --replace-transcript` 保真重建，不要手工压缩重写。
 
 ## 模型选型
 
-转写后端默认 **FunASR SenseVoice-Small**（CPU 约 9x 实时、长音频精度与 Paraformer 相当、原生多语种、+LLM 后处理即可补足英文专名大小写）。Paraformer-Large 作为可选 `--model paraformer-large`，适合需要**热词定制**（常驻嘉宾名/产品名）或最稳**字级时间戳**的场景。原 faster-whisper 路线已移除——它的提速完全依赖 ffmpeg 切片 + 多进程并行，该机制退役后 Whisper 只剩 ~1x 串行的裸速度，留作兜底只会慢到超时/失败。
+转写后端默认 **FunASR SenseVoice-Small**（CPU 本机实测约 3–5x 实时、RTF 0.2–0.33，随硬件与内存浮动；长音频精度与 Paraformer 相当、原生多语种、+LLM 后处理即可补足英文专名大小写）。Paraformer-Large 作为可选 `--model paraformer-large`，适合需要**热词定制**（常驻嘉宾名/产品名）或最稳**字级时间戳**的场景。原 faster-whisper 路线已移除——它的提速完全依赖 ffmpeg 切片 + 多进程并行，该机制退役后 Whisper 只剩 ~1x 串行的裸速度，留作兜底只会慢到超时/失败。
+
+三模型同期的实跑对比实验与最终选型决策记录在 [`benchmark/vol74-asr-comparison/`](benchmark/vol74-asr-comparison/README.md)。
 
 ## 模型缓存
 
@@ -73,8 +124,8 @@ FunASR 模型（SenseVoice-Small、Paraformer-Large、ct-punc 标点、fsmn-vad�
 | FunASR（SenseVoice-Small / Paraformer-Large） | 在本地把音频转成带时间信息的原始文字 | 不负责内容提要、人物判断和文稿结构 |
 | 说话人识别 | 根据声音特征区分说话人，生成 `SPEAKER_00` 等标签；VAD 段上限 4s 从源头降低快速接话的混段概率 | 只区分声音，不直接确认真实姓名和身份；混段自动保留 `[SPEAKER_XX]` 而非猜测归属 |
 | LLM 全文校订 | 分块修正错字、口语、专名和分段，保留原意 | 不重新创作或扩写播客观点 |
-| LLM 内容提炼 | 结合 Show Notes 和校订全文，生成内容提要、人物简介、闪光语句、Mermaid 思维导图大纲和关键词，并在证据充分时映射说话人身份 | 信息不足时不猜测人物身份 |
-| Markdown 组装 | 按固定结构写入 Show Notes、提要、闪光语句、大纲、关键词、人物简介和全文 | 不参与语义判断 |
+| LLM 内容提炼 | 结合 Show Notes 和校订全文，生成摘要、内容提要、闪光语句、问题与思考、关键词，并在证据充分时映射说话人身份 | 信息不足时不猜测人物身份 |
+| Markdown 组装 | 按固定结构写入 Show Notes、摘要、提要、闪光语句、问题与思考、关键词、人物简介和全文 | 不参与语义判断 |
 
 ## 快速开始
 
@@ -103,6 +154,20 @@ python -m src.processor.session_edit output/<节目名>_diarized.txt --prompt-on
 # 会话内校订：用已配置 LLM 自动完成并校验
 python -m src.processor.session_edit output/<节目名>_diarized.txt
 ```
+
+## 批量转录与常驻服务
+
+模型加载一次需约 1 分钟（若被 Defender 实时扫描拖累可达约 20 分钟）。批量处理多期时，把模型常驻内存、避免每期冷启动重载：
+
+```powershell
+# 先启动常驻转写服务（模型只加载一次）
+xiesheng --server
+
+# 再批量转录（本进程不再加载模型，逐期走 HTTP）
+xiesheng url1 url2 url3 ... --use-server http://127.0.0.1:8765
+```
+
+转写默认长音频分块并行（`--jobs` 默认 2 个 worker 进程，各 worker 自带模型常驻，批量/常驻服务下只加载一次）；速度取决于硬件与内存：本机（i5-12500H / 16GB）串行实测约 3–5x 实时（RTF 0.2–0.33），内存充足时并行可进一步接近翻倍。内存紧张会退化为交换、明显变慢甚至停滞，因此工具会按可用内存自动降档 worker 数（宁慢不崩），也可显式 `--jobs 1` 回退串行。若内存宽松想提速，可尝试 `--batch-size-s 90/120` 并对照 RTF 与输出精度做 A/B：提速且精度不下降即可保留，否则回退默认值。
 
 ## 前置依赖
 
@@ -133,8 +198,12 @@ LLM_BASE_URL=https://your-provider/v1
 | `--no-llm` | 否 | 仅转写与说话人区分，产出会话输入包，不需要 LLM API Key |
 | `--no-diarization` | 否 | 跳过说话人识别 |
 | `--spk-max-seg-ms` | `4000` | 说话人分离粒度：VAD 段上限（毫秒），段越短越不易把两人快速接话并成一段；可回退 `8000` |
+| `--batch-size-s` | `60` | FunASR VAD 批切段时长（秒）：越大单次送入越长、调用次数越少但峰值内存越高；内存紧张默认保守，可在 90/120 间 A/B 验证后上调 |
+| `--server` | 否 | 启动常驻转写服务（模型只加载一次，HTTP 接口见 src/server.py） |
+| `--server-port` | `8765` | 常驻转写服务端口 |
+| `--use-server` | 无 | 走常驻转写服务（如 http://127.0.0.1:8765），本进程不加载模型 |
 | `--audio` | 无 | 复用已有的 16k mono WAV（需为本期音频），跳过下载与转换 |
-| `--jobs` | `1` | 预留参数（FunASR 整段串行转录，暂不使用） |
+| `--jobs` | `2` | 长音频分块并行转写的 worker 进程数（默认 2；内存紧张自动降档，可用 `--jobs 1` 回退串行） |
 | `--refresh` | 否 | 忽略结果缓存，强制重新转录与整理 |
 
 ## 输出格式
@@ -146,6 +215,9 @@ LLM_BASE_URL=https://your-provider/v1
 # Show Notes
 （完整保留的节目介绍）
 
+## 摘要
+（2-3 句话总结本期主题与核心内容，不列要点）
+
 ## 内容提要
 - **要点名称**：支撑证据
 （不限条数，提炼全部重要观点）
@@ -154,14 +226,9 @@ LLM_BASE_URL=https://your-provider/v1
 - **关键词**：精彩原话
 （不限条数，关键短语加粗）
 
-## 大纲
-​```mermaid
-mindmap
-  root((节目标题))
-    "00:00 一级主题"
-      二级要点
-```
-（Mermaid 思维导图；一级主题带真实播放时间）
+## 问题与思考
+- **① 核心问题（整理式，非原文照抄）？** 思考或回答（1-3 句）
+（3-5 个核心追问，与内容提要、闪光语句互补不重复）
 
 ## 关键词
 - **关键词**：1-2 句说明
@@ -208,6 +275,8 @@ mindmap
 ```
 src/
 ├── main.py                 # CLI 入口
+├── server.py               # 常驻转写服务（模型只加载一次，HTTP 接口）
+├── quick_reprocess.py      # 从已有 WAV 快速重跑（委托 main --audio，deprecated）
 ├── config.py               # LLM 配置加载
 ├── audio.py                # 音频下载与格式转换
 ├── utils.py                # 计时、计费等工具
@@ -224,7 +293,9 @@ src/
 │   ├── prompt.py           # 忠实校订与提要生成提示词
 │   ├── normalize.py        # 文本归一化
 │   ├── llm_processor.py    # 并行分块校订、模型探测回退、校验、缓存与文稿整理
-│   └── session_edit.py     # 会话内校订：固定规范提示词 + 结构校验器 + CLI
+│   ├── session_edit.py     # 会话内校订：固定规范提示词 + 结构校验器 + CLI
+│   ├── rebuild_transcript.py  # 会话包保真重建全文转录（防过度删减）
+│   └── finish_phase_b.py   # Phase B 幂等续跑：扫描/生成缺失初稿/补来源行/校验报告/说话人画像
 └── renderer/markdown.py    # Markdown 渲染
 ```
 

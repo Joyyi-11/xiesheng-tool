@@ -57,3 +57,16 @@ class TestResultCache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text("{{{ 不是json", encoding="utf-8")
         assert load_cache(tmp_path) == {}
+
+    def test_write_failure_degrades_to_noop(self, tmp_path):
+        """B1：缓存写失败（如 Windows 下 tmp.replace 被占用）不得抛异常，
+        否则会把已成功产出的整期误判为失败（vol.231 实测 WinError 5）。"""
+        md = tmp_path / "out.md"
+        md.write_text("# 内容", encoding="utf-8")
+        # 让 .work 目录不可写：用文件占住目录名，save_cache 的 mkdir 会失败
+        blocker = tmp_path / ".work"
+        blocker.write_text("占用", encoding="utf-8")
+        # 不应抛异常
+        record_result(tmp_path, "https://a/1", "2026-01-01", md)
+        # 缓存未写成，find 返回 None，但流程不中断
+        assert find_cached_markdown(tmp_path, "https://a/1", "2026-01-01") is None

@@ -153,20 +153,21 @@ class TestStartTimeParsing:
         assert _parse_start_sec(None) is None
 
 
-class TestParsingOutline:
-    def test_build_output_doc_includes_outline_with_start(self):
+class TestParsingSummaryAndQuestions:
+    def test_build_output_doc_includes_summary_and_questions(self):
         data = {
-            "outline": [
-                {"title": "主题一", "start": "00:05:00", "points": ["子点A"]},
-                {"title": "主题二"},
-            ]
+            "summary": " 本期讲求职策略 ",
+            "questions": [
+                {"question": "找不到工作是谁的问题？", "answer": "策略错位。"},
+                {"question": "副业该不该搞？"},
+            ],
         }
         doc = _build_output_doc(data, "T", "P", "2026-01-01", "", "")
-        assert len(doc.outline) == 2
-        assert doc.outline[0].title == "主题一"
-        assert doc.outline[0].start_sec == 300
-        assert doc.outline[0].points == ["子点A"]
-        assert doc.outline[1].start_sec is None
+        assert doc.summary == "本期讲求职策略"
+        assert len(doc.questions) == 2
+        assert doc.questions[0].question == "找不到工作是谁的问题？"
+        assert doc.questions[0].answer == "策略错位。"
+        assert doc.questions[1].answer == ""
 
 
 class TestParsingKeywords:

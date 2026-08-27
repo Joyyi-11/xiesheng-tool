@@ -28,12 +28,14 @@ from src.config import DEFAULT_LLM_PROVIDER, LLM_MODELS, get_llm_config
 logger = logging.getLogger(__name__)
 
 # 改动 SESSION_RULES 或输出结构时必须递增，让旧产出可与新规则区分。
-SESSION_SPEC_VERSION = 4
+# v6：校订规则新增第 9 条「全文转录信息量硬线」（防过度删减 + rebuild 工具指引）。
+SESSION_SPEC_VERSION = 6
 
 REQUIRED_HEADINGS = (
+    "## 摘要",
     "## 内容提要",
     "## 闪光语句",
-    "## 大纲",
+    "## 问题与思考",
     "## 关键词",
     "## 人物简介",
     "## 全文转录",
@@ -53,6 +55,10 @@ SESSION_RULES = """你是一名专业的中文播客文稿编辑。下面是一�
 
 （完整保留输入包中的 Show Notes 原文，不增删不改写）
 
+## 摘要
+
+（2-3 句话总结本期播客的主题与核心内容；不列要点、不分段，聚焦「这期讲了什么、核心结论是什么」，基于全文但不照搬原文）
+
 ## 内容提要
 
 - **主题句。** 支撑证据或展开说明（1-2 句）
@@ -63,15 +69,10 @@ SESSION_RULES = """你是一名专业的中文播客文稿编辑。下面是一�
 - **关键词或短语**：原话中的精彩表述
 （抓取所有值得保留的原话，不限制条数；必须忠实原文，不加引号；每条把最能代表该句的**关键词或关键短语加粗**——加粗对象是原文中出现的词或短语，不是整句）
 
-## 大纲
+## 问题与思考
 
-```mermaid
-mindmap
-  root((节目标题))
-    01:24 一级主题
-      二级要点
-```
-（用 Mermaid mindmap 代码块呈现节目结构；一级主题带真实播放时间（mm:ss，来自输入包的时间段信息，无法确定时用序号），每个一级主题 6-15 字，其下可有 1-5 个二级要点；大纲是结构梳理，与内容提要的论点提炼分工，不要简单重复）
+- **① 核心问题（整理式，非原文照抄）？** 对应的思考或回答（1-3 句，经提炼整理，不与原句逐字重复）
+（筛选 3-5 个最值得关注、最能引发思考的问题与回答；须为节目真正讨论过的核心议题，不是随机摘取的全文提问；可与内容提要、闪光语句互补但不重复——若某点已在内容提要中作为论点展开，这里转而呈现其「追问与张力」，不要复述同一结论）
 
 ## 关键词
 
@@ -98,8 +99,9 @@ mindmap
 4. 保留“但是、所以、其实、不过”等逻辑转折词。
 5. 段落按语义自然分段，每段 2-4 句为宜；同一说话人连续多段只在第一段标注说话人。
 6. 双引号统一使用中文直角引号「」（英文术语、代码、URL 内的可保留英文引号）。
-7. 内容提要、闪光语句、大纲、关键词、人物简介都只基于会话包内容生成，不编造原文没有的信息。
+7. 摘要、内容提要、闪光语句、问题与思考、关键词、人物简介都只基于会话包内容生成，不编造原文没有的信息。
 8. 只校订，不创作：不扩写观点、不补充背景、不总结替代原文。
+9. 全文转录信息量硬线：保留原文全部事例、数字与对话原貌，口语长叙述不得压缩成概要；校验器以「全文转录 ≥ 原始转录 50%」为硬线（低于 50% 判为过度删减）。若已触发，用 `python -m src.processor.rebuild_transcript <会话包> -o <md>` 从会话包保真重建全文转录后再校订，不要手工重写压缩版。
 """
 
 
@@ -183,19 +185,6 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
     if quotes and not all(re.search(r"\*\*.+\*\*", item) for item in quotes):
         problems.append("闪光语句中存在未加粗关键词的条目（每条须把原话中的 **关键词/短语** 加粗）")
 
-    # 大纲：Mermaid mindmap 代码块，含 root 与一级主题（带时间或序号）
-    outline = sections.get("## 大纲", "")
-    mermaid_block = re.search(r"```mermaid\s*\n(mindmap[\s\S]*?)```", outline)
-    if outline and not mermaid_block:
-        problems.append("大纲未使用 ```mermaid mindmap 代码块（应包含 mindmap 与 root((标题))）")
-    if mermaid_block:
-        body = mermaid_block.group(1)
-        top_topics = [l for l in body.splitlines() if re.match(r"^\s{4}\S", l) and "root" not in l]
-        if len(top_topics) < 3:
-            problems.append(f"大纲一级主题应至少 3 个（实际 {len(top_topics)}）")
-        if not all(re.search(r'^\s{4}"?\d{1,2}:\d{2}"?\s', l) or re.search(r"^\s{4}\d{2}\s", l) for l in top_topics):
-            problems.append("大纲一级主题应带真实时间（mm:ss）或序号开头")
-
     # 关键词：4-8 条，且每项为 **关键词**：解释
     keywords = [line for line in sections.get("## 关键词", "").splitlines() if line.strip().startswith("- ")]
     if keywords:
@@ -226,7 +215,12 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
     if source_text and transcript:
         ratio = len(transcript) / max(len(source_text), 1)
         if ratio < 0.5:
-            problems.append(f"全文转录长度仅为原始转录的 {ratio:.0%}（疑似过度删减）")
+            problems.append(
+                f"全文转录长度仅为原始转录的 {ratio:.0%}（疑似过度删减）。"
+                "校订须保留原文全部信息（事例、数字、对话），只做填充词删除/错字修正/分段，"
+                "不得把口语叙述压缩成概要；若已过度压缩，可用 "
+                "`python -m src.processor.rebuild_transcript <包> -o <md>` 从会话包保真重建全文转录。"
+            )
 
     return problems
 

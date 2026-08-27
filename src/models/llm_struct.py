@@ -13,8 +13,7 @@ from pydantic import BaseModel, Field
 MAX_KEY_POINTS = 20
 MAX_QUOTES = 20
 MAX_KEYWORDS = 10
-MAX_OUTLINE_ITEMS = 15
-MAX_OUTLINE_POINTS = 6
+MAX_QUESTIONS = 5
 
 
 def _clean_str(value: Any) -> str:
@@ -67,15 +66,14 @@ class KeywordOut(BaseModel):
         return bool(self.key)
 
 
-class OutlineItemOut(BaseModel):
+class QuestionItemOut(BaseModel):
     model_config = {"str_strip_whitespace": True}
-    title: str = ""
-    points: list[str] = Field(default_factory=list)
-    start: Any = None  # mm:ss / h:mm:ss / 秒，渲染为一级主题的时间前缀
+    question: str = ""
+    answer: str = ""
 
     @property
     def valid(self) -> bool:
-        return bool(self.title)
+        return bool(self.question)
 
 
 class SpeakerMappingOut(BaseModel):
@@ -90,7 +88,8 @@ class StructOut(BaseModel):
     speaker_intro: str = ""
     speaker_mapping: dict[str, Any] = Field(default_factory=dict)
     keywords: list[KeywordOut] = Field(default_factory=list)
-    outline: list[OutlineItemOut] = Field(default_factory=list)
+    summary: str = ""
+    questions: list[QuestionItemOut] = Field(default_factory=list)
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -130,27 +129,17 @@ def parse_struct(raw: dict[str, Any] | None) -> StructOut:
                     continue
         return out[:MAX_KEYWORDS]
 
-    def outline() -> list[OutlineItemOut]:
-        out: list[OutlineItemOut] = []
-        for item in _as_list(raw.get("outline")):
+    def questions() -> list[QuestionItemOut]:
+        out: list[QuestionItemOut] = []
+        for item in _as_list(raw.get("questions")):
             if isinstance(item, dict):
                 try:
-                    cleaned = dict(item)
-                    points = cleaned.get("points")
-                    if isinstance(points, list):
-                        # 容忍子点中的非字符串元素，避免一个坏子点拖垮整个大纲节点
-                        cleaned["points"] = [
-                            _clean_str(p) for p in points if p is not None
-                        ]
-                    node = OutlineItemOut.model_validate(cleaned)
-                    if node.valid:
-                        node.points = [
-                            p for p in node.points if p
-                        ][:MAX_OUTLINE_POINTS]
-                        out.append(node)
+                    q = QuestionItemOut.model_validate(item)
+                    if q.valid:
+                        out.append(q)
                 except Exception:
                     continue
-        return out[:MAX_OUTLINE_ITEMS]
+        return out[:MAX_QUESTIONS]
 
     mapping = raw.get("speaker_mapping")
     intro = raw.get("speaker_intro")
@@ -160,7 +149,8 @@ def parse_struct(raw: dict[str, Any] | None) -> StructOut:
         speaker_intro=_clean_str(intro) if isinstance(intro, str) else "",
         speaker_mapping=mapping if isinstance(mapping, dict) else {},
         keywords=keywords(),
-        outline=outline(),
+        summary=_clean_str(raw.get("summary")),
+        questions=questions(),
     )
 
 
@@ -174,13 +164,8 @@ def struct_to_doc(struct: StructOut) -> dict[str, Any]:
         "speaker_intro": _clean_str(struct.speaker_intro),
         "speaker_mapping": struct.speaker_mapping or {},
         "keywords": [{"key": k.key, "desc": k.desc} for k in struct.keywords if k.valid],
-        "outline": [
-            {
-                "title": node.title,
-                "points": [p for p in node.points if p],
-                "start": node.start,
-            }
-            for node in struct.outline
-            if node.valid
+        "summary": _clean_str(struct.summary),
+        "questions": [
+            {"question": q.question, "answer": q.answer} for q in struct.questions if q.valid
         ],
     }

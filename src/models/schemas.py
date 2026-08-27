@@ -45,11 +45,10 @@ class Keyword:
 
 
 @dataclass
-class OutlineItem:
-    """A hierarchical outline node: a topic (optionally with start time) and sub-points."""
-    title: str
-    points: list[str] = field(default_factory=list)
-    start_sec: float | None = None
+class QuestionItem:
+    """A curated question + synthesized answer for the 问题与思考 section."""
+    question: str
+    answer: str = ""
 
 
 @dataclass
@@ -65,6 +64,7 @@ class OutputDoc:
     speaker_intro: str = ""  # speaker introduction from Show Notes (Markdown)
     highlights: list[Highlight] = field(default_factory=list)  # quotes with timestamp/speaker
     keywords: list[Keyword] = field(default_factory=list)
-    outline: list[OutlineItem] = field(default_factory=list)  # hierarchical content outline (mindmap)
+    summary: str = ""  # 2-3 sentence episode summary
+    questions: list[QuestionItem] = field(default_factory=list)  # curated Q&A for reflection
     costs: dict = field(default_factory=dict)  # {"transcription": 0.0, "llm": 0.0}
     timings: dict = field(default_factory=dict)  # {"scrape": 0, "transcribe": 0, "process": 0}

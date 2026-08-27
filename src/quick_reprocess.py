@@ -1,5 +1,11 @@
 r"""Quick re-run from existing audio (thin wrapper over the main pipeline).
 
+DEPRECATED: 完全委托 ``src.main`` 的 ``--audio`` 参数，直接使用
+
+    xiesheng <url> --audio <existing.wav> [extra flags...]
+
+即可达到同等效果；本入口仅保留兼容，不再新增功能。
+
 This exists for convenience during development/iteration: given an episode URL
 and an already-converted 16k mono WAV, it re-runs the whole ``xiesheng``
 pipeline while skipping download and re-conversion.

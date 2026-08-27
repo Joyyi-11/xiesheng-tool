@@ -39,6 +39,9 @@ def build_output_markdown(doc: OutputDoc) -> str:
     if doc.show_notes:
         lines += ["", "# Show Notes", "", doc.show_notes]
 
+    if doc.summary:
+        lines += ["", "## 摘要", "", doc.summary]
+
     lines += ["", "## 内容提要", ""]
     for kp in doc.key_points:
         evidence = f"：{kp.evidence}" if kp.evidence else ""
@@ -57,18 +60,10 @@ def build_output_markdown(doc: OutputDoc) -> str:
         for q in doc.highlight_quotes:
             lines.append(f"- {q}")
 
-    if doc.outline:
-        nodes = [node for node in doc.outline if node.title]
-        if nodes:
-            lines += ["", "## 大纲", "", "```mermaid", "mindmap"]
-            lines.append(f"  root(({doc.title}))")
-            for node in nodes:
-                ts = fmt_ts(node.start_sec) if node.start_sec is not None else ""
-                prefix = f"\"{ts} {node.title}\"" if ts else node.title
-                lines.append(f"    {prefix}")
-                for point in node.points:
-                    lines.append(f"      {point}")
-            lines += ["```"]
+    if doc.questions:
+        lines += ["", "## 问题与思考", ""]
+        for q in doc.questions:
+            lines.append(f"- **{q.question}** {q.answer}")
 
     if doc.keywords:
         lines += ["", "## 关键词", ""]

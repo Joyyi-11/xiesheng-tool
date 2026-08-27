@@ -107,7 +107,8 @@ STRUCT_SYSTEM_PROMPT = """你是中文播客文稿编辑。基于已经校订的
   "speaker_intro": "**身份姓名**：简介",
   "speaker_mapping": {"SPEAKER_00": "身份姓名"},
   "keywords": [{"key": "关键词", "desc": "1-2 句说明"}],
-  "outline": [{"title": "一级主题", "start": "00:05:49", "points": ["二级要点"]}]
+  "summary": "2-3 句话的节目主题与核心结论总结",
+  "questions": [{"question": "核心问题（整理式，非原文照抄）", "answer": "经提炼整理的回答，1-3 句"}]
 }
 
 要求：
@@ -116,9 +117,10 @@ STRUCT_SYSTEM_PROMPT = """你是中文播客文稿编辑。基于已经校订的
 3. speaker_intro 优先依据 Show Notes，每人一行正文格式（**身份姓名**：简介），**不用引用格式**；信息不足时留空，不猜测。
 4. speaker_mapping 只在能可靠判断时填写：结合 Show Notes 与对话内容，把 SPEAKER 标签对号入座为“身份姓名”。**若一段内出现两个不同人物的人称自述（如“我是A”“我叫B”同时出现）或明显的问答交替、快速接话，判定该段为多人混段**：不得把整段映射给某一个说话人，也不要按段首内容猜测整段归属——直接将混段标签移出 speaker_mapping（最终稿中该标签保留 [SPEAKER_XX] 原文）。
 5. keywords 提取 4-8 个贯穿节目主题的核心概念，desc 用 1-2 句客观说明。
-6. outline 生成 3-8 个一级主题，按节目话题推进顺序梳理内容的逻辑结构：每个一级主题用 6-15 字概括，**start 是该主题在节目中的起始时间**（格式 "mm:ss" 或 "h:mm:ss"，从 00:00:00 起递增），其下可有 1-5 个二级要点（points），用短语概括该话题的子论点；无子论点时 points 可为空数组。outline 与 key_points 分工：key_points 提炼论点，outline 梳理结构，不要简单重复。
-7. 所有双引号统一用直角引号「」，不用英文直引号 "。
-8. 只返回 JSON，不返回正文或 Markdown 代码围栏。
+6. summary 用 2-3 句话总结本期播客的主题与核心内容；聚焦「这期讲了什么、核心结论是什么」，基于全文但不照搬原文，不列要点、不分段。
+7. questions 筛选 3-5 个最值得关注、最能引发思考的问题与回答；问题须为节目真正讨论过的核心议题，不是随机摘取全文提问；answer 经提炼整理（1-3 句），不与原句逐字重复；可与 key_points、highlight_quotes 互补但不重复——若某议题已在 key_points 中作为论点展开，这里转而呈现其追问与张力，不复述同一结论。
+8. 所有双引号统一用直角引号「」，不用英文直引号 "。
+9. 只返回 JSON，不返回正文或 Markdown 代码围栏。
 """
 
 STRUCT_USER_PROMPT = """## 节目信息
@@ -131,4 +133,4 @@ STRUCT_USER_PROMPT = """## 节目信息
 ## 已校订逐字稿
 {transcript_text}
 
-请基于以上内容，一次生成 key_points、highlight_quotes、speaker_intro、speaker_mapping、keywords、outline，并返回上述格式的 JSON。"""
+请基于以上内容，一次生成 key_points、highlight_quotes、speaker_intro、speaker_mapping、keywords、summary、questions，并返回上述格式的 JSON。"""

@@ -1,6 +1,6 @@
 """Tests for the Markdown renderer."""
 
-from src.models.schemas import Highlight, KeyPoint, Keyword, OutlineItem, OutputDoc
+from src.models.schemas import Highlight, KeyPoint, Keyword, OutputDoc, QuestionItem
 from src.renderer.markdown import build_output_markdown, fmt_ts
 
 
@@ -75,34 +75,29 @@ class TestBuildOutputMarkdown:
         assert "- **术语**：解释" in md
         assert "- **无解释**" in md
 
-    def test_renders_mermaid_outline_after_highlights(self):
+    def test_renders_summary_before_key_points(self):
+        doc = _make_doc(summary="本期聊了求职。")
+        md = build_output_markdown(doc)
+        assert "## 摘要" in md
+        assert "本期聊了求职。" in md
+        # 摘要位于 Show Notes 之后、内容提要之前
+        assert md.index("# Show Notes") < md.index("## 摘要") < md.index("## 内容提要")
+
+    def test_renders_questions_after_highlights(self):
         doc = _make_doc(
-            outline=[
-                OutlineItem(title="主题一", points=["子点 A", "子点 B"], start_sec=0),
-                OutlineItem(title="主题二", start_sec=300),
+            questions=[
+                QuestionItem(question="找不到工作是谁的问题？", answer="策略错位。"),
+                QuestionItem(question="副业该不该搞？", answer="反哺主业才好。"),
             ]
         )
         md = build_output_markdown(doc)
-        assert "## 大纲" in md
-        assert "```mermaid" in md
-        assert "mindmap" in md
-        assert "root((标题))" in md
-        assert '"00:00 主题一"' in md
-        assert "      子点 A" in md
-        assert '"05:00 主题二"' in md
-        # 大纲位于闪光语句之后
-        assert md.index("## 闪光语句") < md.index("## 大纲")
+        assert "## 问题与思考" in md
+        assert "- **找不到工作是谁的问题？** 策略错位。" in md
+        assert "- **副业该不该搞？** 反哺主业才好。" in md
+        # 问题与思考位于闪光语句之后、人物简介之前
+        assert md.index("## 闪光语句") < md.index("## 问题与思考") < md.index("## 人物简介")
 
-    def test_outline_without_time_uses_plain_title(self):
-        doc = _make_doc(outline=[OutlineItem(title="无时间主题")])
-        md = build_output_markdown(doc)
-        assert "    无时间主题" in md
-
-    def test_no_outline_section_when_empty(self):
+    def test_no_summary_or_questions_section_when_empty(self):
         md = build_output_markdown(_make_doc())
-        assert "## 大纲" not in md
-
-    def test_skips_outline_nodes_without_title(self):
-        doc = _make_doc(outline=[OutlineItem(title="", points=["孤儿子点"])])
-        md = build_output_markdown(doc)
-        assert "## 大纲" not in md
+        assert "## 摘要" not in md
+        assert "## 问题与思考" not in md

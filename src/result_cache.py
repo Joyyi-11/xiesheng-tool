@@ -39,11 +39,25 @@ def load_cache(output_dir: Path) -> dict:
 
 
 def save_cache(output_dir: Path, cache: dict) -> None:
+    """Persist the cache. Failures degrade to a no-op (never raise).
+
+    Windows 下 ``tmp.replace`` 可能因目标被占用（如 Defender 实时扫描、
+    其他进程并发写）抛 ``PermissionError``；此前该异常会向上传播，把
+    已成功产出的整期误判为失败（vol.231 实测 WinError 5）。缓存只是幂等
+    记录，写失败不应翻转转录结果——降级为 warning，下次运行可重建。
+    """
     path = _cache_path(output_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        logger.warning("Result cache write failed, degraded to no-op: %s", exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def find_cached_markdown(output_dir: Path, url: str, pub_date: str = "") -> Path | None:

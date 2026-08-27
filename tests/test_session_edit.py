@@ -15,6 +15,10 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 
 这是一期对谈节目，嘉宾是亚马逊 AGI 优化与研究团队负责人查晟。
 
+## 摘要
+
+本期对谈亚马逊 AGI 查晟，围绕开源大模型、模型塌缩与人类品味在 AI 时代的角色展开。
+
 ## 内容提要
 
 - **中国团队坚持开源大模型。** 但缺乏数据分发。
@@ -26,22 +30,10 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 - **品味**：这是一种很稀缺的能力。
 - **prompt**：这是一个 prompt，最终被 AI 写的。
 
-## 大纲
+## 问题与思考
 
-```mermaid
-mindmap
-  root((品味老师))
-    00:00 开源与数据飞轮
-      开源模型无法回流数据
-    08:00 模型塌缩的可控性
-      质量过滤与多样性控制
-    15:00 人类的品味角色
-      定义问题与优化方向
-    22:00 认知负债与监管缺位
-    30:00 主权 AI 与文化同化
-    40:00 通才与第一性原理
-      通识教育与提问能力
-```
+- **① 开源模型最大的结构性缺陷是什么？** 无法从用户使用回流训练数据，数据飞轮转不起来。
+- **② 模型塌缩可控吗？** 关键在于对生成数据做质量过滤与多样性控制，维持多样性。
 
 ## 关键词
 
@@ -73,13 +65,13 @@ def test_build_session_prompt_wraps_package():
     prompt = build_session_prompt(package)
     assert "会话内校订规范" in prompt
     assert "# Show Notes" in prompt
+    assert "## 摘要" in prompt
     assert "## 内容提要" in prompt
     assert "## 闪光语句" in prompt
-    assert "## 大纲" in prompt
+    assert "## 问题与思考" in prompt
     assert "## 关键词" in prompt
     assert "## 人物简介" in prompt
     assert "## 全文转录" in prompt
-    assert "mermaid" in prompt  # 大纲要求 Mermaid mindmap
     assert package in prompt  # 输入包原样嵌入
 
 
@@ -99,24 +91,21 @@ def test_validate_rejects_missing_heading():
     assert any("闪光语句" in p for p in problems)
 
 
-def test_validate_rejects_too_few_outline_topics():
+def test_validate_rejects_missing_summary():
+    bad = GOLDEN.replace("## 摘要\n\n本期对谈亚马逊 AGI 查晟，围绕开源大模型、模型塌缩与人类品味在 AI 时代的角色展开。\n\n", "")
+    problems = validate_session_output(bad)
+    assert any("摘要" in p for p in problems)
+
+
+def test_validate_rejects_missing_questions():
     bad = GOLDEN.replace(
-        "    08:00 模型塌缩的可控性\n"
-        "      质量过滤与多样性控制\n"
-        "    15:00 人类的品味角色\n"
-        "      定义问题与优化方向\n"
-        "    22:00 认知负债与监管缺位\n"
-        "    30:00 主权 AI 与文化同化\n",
+        "## 问题与思考\n\n"
+        "- **① 开源模型最大的结构性缺陷是什么？** 无法从用户使用回流训练数据，数据飞轮转不起来。\n"
+        "- **② 模型塌缩可控吗？** 关键在于对生成数据做质量过滤与多样性控制，维持多样性。\n\n",
         "",
     )
     problems = validate_session_output(bad)
-    assert any("大纲" in p for p in problems)
-
-
-def test_validate_rejects_outline_without_mermaid():
-    bad = GOLDEN.replace("```mermaid\nmindmap\n  root((品味老师))\n", "")
-    problems = validate_session_output(bad)
-    assert any("mermaid" in p for p in problems)
+    assert any("问题与思考" in p for p in problems)
 
 
 def test_validate_rejects_too_few_keywords():
@@ -171,9 +160,10 @@ def test_validate_rejects_overly_short_transcript():
 
 def test_required_headings_are_exported():
     assert REQUIRED_HEADINGS == (
+        "## 摘要",
         "## 内容提要",
         "## 闪光语句",
-        "## 大纲",
+        "## 问题与思考",
         "## 关键词",
         "## 人物简介",
         "## 全文转录",

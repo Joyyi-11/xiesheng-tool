@@ -36,6 +36,11 @@ def download_audio(url: str, output_dir: Path | None = None, stem: str | None = 
     ext = _guess_extension(url)
     dest = output_dir / f"{stem}{ext}"
 
+    # 跳过已存在的音频：批量重跑时避免重复下载大文件（如 EP80 252MB）。
+    if dest.exists() and dest.stat().st_size > 0:
+        logger.info("音频已存在，跳过下载：%s", dest)
+        return dest
+
     logger.info("Downloading audio from %s ...", url)
     with requests.get(
         url,

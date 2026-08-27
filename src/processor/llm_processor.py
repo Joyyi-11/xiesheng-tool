@@ -17,7 +17,7 @@ from openai import OpenAI
 
 from src.config import LLMConfig
 from src.models.llm_struct import parse_struct
-from src.models.schemas import Highlight, KeyPoint, Keyword, OutlineItem, OutputDoc
+from src.models.schemas import Highlight, KeyPoint, Keyword, OutputDoc, QuestionItem
 from src.processor.prompt import (
     CLEAN_SYSTEM_PROMPT,
     CLEAN_USER_PROMPT,
@@ -729,15 +729,11 @@ def _build_output_doc(
                 f"{name.strip()}：",
                 full_text,
             )
-    outline: list[OutlineItem] = []
-    for node in struct.outline:
-        if not node.valid:
-            continue
-        try:
-            start_sec = _parse_start_sec(node.start)
-        except ValueError:
-            start_sec = None
-        outline.append(OutlineItem(title=node.title, points=list(node.points), start_sec=start_sec))
+    questions = [
+        QuestionItem(question=q.question, answer=q.answer)
+        for q in struct.questions
+        if q.valid
+    ]
     return OutputDoc(
         title=title,
         podcast_name=podcast_name,
@@ -748,6 +744,7 @@ def _build_output_doc(
         full_text=full_text,
         speaker_intro=speaker_intro,
         keywords=[Keyword(key=kw.key, desc=kw.desc) for kw in struct.keywords if kw.valid],
-        outline=outline,
+        summary=struct.summary,
+        questions=questions,
     )
 
