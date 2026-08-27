@@ -23,6 +23,7 @@ HTTP 接口：
 import json
 import logging
 import os
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -33,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+
+# 常驻转写器非线程安全：并发请求共享同一 FunASR 实例，串行化避免竞态
+# （含 _align_speakers 内 SV 模型懒加载）；当前 CLI 单客户端，此为防御性保护。
+_TRANSCRIBE_LOCK = threading.Lock()
 
 
 class HttpTranscriber(Transcriber):
@@ -99,11 +104,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "audio path missing or not found"})
             return
         try:
-            result = self.transcriber.transcribe(
-                Path(audio),
-                duration_sec=payload.get("duration_sec"),
-                work_dir=Path(payload["work_dir"]) if payload.get("work_dir") else None,
-            )
+            with _TRANSCRIBE_LOCK:
+                result = self.transcriber.transcribe(
+                    Path(audio),
+                    duration_sec=payload.get("duration_sec"),
+                    work_dir=Path(payload["work_dir"]) if payload.get("work_dir") else None,
+                )
             self._json(200, {
                 "raw_text": result.raw_text,
                 "segments": result.segments,

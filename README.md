@@ -276,7 +276,6 @@ LLM_BASE_URL=https://your-provider/v1
 src/
 ├── main.py                 # CLI 入口
 ├── server.py               # 常驻转写服务（模型只加载一次，HTTP 接口）
-├── quick_reprocess.py      # 从已有 WAV 快速重跑（委托 main --audio，deprecated）
 ├── config.py               # LLM 配置加载
 ├── audio.py                # 音频下载与格式转换
 ├── utils.py                # 计时、计费等工具
