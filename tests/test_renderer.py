@@ -1,6 +1,6 @@
 """Tests for the Markdown renderer."""
 
-from src.models.schemas import Highlight, KeyPoint, Keyword, OutputDoc, QuestionItem
+from src.models.schemas import KeyPoint, Keyword, OutputDoc, QuestionItem
 from src.renderer.markdown import build_output_markdown, fmt_ts
 
 
@@ -10,8 +10,7 @@ def _make_doc(**kw):
         "podcast_name": "播客",
         "pub_date": "2026-01-01",
         "show_notes": "节目简介",
-        "key_points": [KeyPoint("要点", "证据")],
-        "highlight_quotes": ["闪光语句。"],
+        "key_points": [KeyPoint("要点", "证据", "这是一句原话。")],
         "speaker_intro": "**主播**：某人",
         "full_text": "正文内容。",
         "costs": {},
@@ -37,10 +36,11 @@ class TestBuildOutputMarkdown:
         md = build_output_markdown(_make_doc())
         assert "> 来源：播客 | 标题 | 2026-01-01" in md
 
-    def test_renders_key_points_and_quotes(self):
+    def test_renders_core_viewpoints_and_quotes(self):
         md = build_output_markdown(_make_doc())
+        assert "## 核心观点" in md
         assert "**要点**：证据" in md
-        assert "- 闪光语句。" in md
+        assert "> 这是一句原话。" in md
 
     def test_renders_footer_when_costs_present(self):
         doc = _make_doc(costs={"llm": 0.02}, timings={"process": 60})
@@ -52,19 +52,17 @@ class TestBuildOutputMarkdown:
         md = build_output_markdown(_make_doc())
         assert "---" not in md
 
-    def test_renders_enriched_highlights_with_ts_and_speaker(self):
+    def test_renders_optional_quote_as_blockquote(self):
         doc = _make_doc(
-            highlight_quotes=["旧格式"],
-            highlights=[
-                Highlight(content="这句话很精彩。", start_sec=125, speaker="主持人连漪"),
-                Highlight(content="没有元数据。"),
+            key_points=[
+                KeyPoint("有原话的要点", "证据", "这是值得单独收录的原话。"),
+                KeyPoint("无原话的要点", "证据"),
             ],
         )
         md = build_output_markdown(doc)
-        assert "## 闪光语句" in md
-        assert "[02:05]（主持人连漪） 「这句话很精彩。」" in md
-        assert "- 「没有元数据。」" in md
-        assert "旧格式" not in md  # 有新版 highlights 时不再回退旧字段
+        assert "## 核心观点" in md
+        assert "## 闪光语句" not in md
+        assert "> 这是值得单独收录的原话。" in md
 
     def test_renders_keywords_section(self):
         doc = _make_doc(
@@ -72,7 +70,7 @@ class TestBuildOutputMarkdown:
         )
         md = build_output_markdown(doc)
         assert "## 关键词" in md
-        assert "- **术语**：解释" in md
+        assert "- **术语**：解释。" in md
         assert "- **无解释**" in md
 
     def test_renders_summary_before_key_points(self):
@@ -80,8 +78,16 @@ class TestBuildOutputMarkdown:
         md = build_output_markdown(doc)
         assert "## 摘要" in md
         assert "本期聊了求职。" in md
-        # 摘要位于 Show Notes 之后、内容提要之前
-        assert md.index("# Show Notes") < md.index("## 摘要") < md.index("## 内容提要")
+        # 摘要位于 Show Notes 之后、核心观点之前
+        assert md.index("## Show Notes") < md.index("## 摘要") < md.index("## 核心观点")
+
+    def test_renders_show_notes_even_when_empty(self):
+        doc = _make_doc(show_notes="", summary="本期聊了求职。")
+        md = build_output_markdown(doc)
+        assert "## Show Notes" in md
+        assert "（无）" in md
+        # 空时仍稳定位于摘要之前
+        assert md.index("## Show Notes") < md.index("## 摘要")
 
     def test_renders_questions_after_highlights(self):
         doc = _make_doc(
@@ -92,10 +98,12 @@ class TestBuildOutputMarkdown:
         )
         md = build_output_markdown(doc)
         assert "## 问题与思考" in md
-        assert "- **找不到工作是谁的问题？** 策略错位。" in md
-        assert "- **副业该不该搞？** 反哺主业才好。" in md
-        # 问题与思考位于闪光语句之后、人物简介之前
-        assert md.index("## 闪光语句") < md.index("## 问题与思考") < md.index("## 人物简介")
+        assert "1. 找不到工作是谁的问题？" in md
+        assert "   策略错位。" in md
+        assert "2. 副业该不该搞？" in md
+        assert "   反哺主业才好。" in md
+        # 问题与思考位于核心观点之后、人物简介之前
+        assert md.index("## 核心观点") < md.index("## 问题与思考") < md.index("## 人物简介")
 
     def test_no_summary_or_questions_section_when_empty(self):
         md = build_output_markdown(_make_doc())

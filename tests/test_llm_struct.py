@@ -8,7 +8,6 @@ class TestParseStruct:
         struct = parse_struct(
             {
                 "key_points": [{"point": "观点", "evidence": "证据"}],
-                "highlight_quotes": [" 闪光句 "],
                 "speaker_intro": "**主播**：Nina",
                 "speaker_mapping": {"SPEAKER_00": "Nina"},
                 "keywords": [{"key": " AI ", "desc": " d "}],
@@ -17,7 +16,6 @@ class TestParseStruct:
             }
         )
         assert struct.key_points[0].point == "观点"
-        assert struct.highlight_quotes == ["闪光句"]
         assert struct.speaker_intro == "**主播**：Nina"
         assert struct.speaker_mapping == {"SPEAKER_00": "Nina"}
         assert struct.keywords[0].key == "AI"
@@ -38,7 +36,6 @@ class TestParseStruct:
         struct = parse_struct(
             {
                 "key_points": [{"point": "好"}, "bad", {"evidence": "no point"}],
-                "highlight_quotes": ["好", 123, "   ", "坏"],
                 "keywords": ["bad", {"key": "", "desc": "空"}],
                 "questions": ["bad", {"question": ""}, {"question": "有效问题", "answer": "整理答案"}],
                 "speaker_intro": 123,
@@ -46,7 +43,6 @@ class TestParseStruct:
             }
         )
         assert [k.point for k in struct.key_points] == ["好", ""]
-        assert struct.highlight_quotes == ["好", "123", "坏"]
         assert len(struct.keywords) == 0
         assert [q.question for q in struct.questions] == ["有效问题"]
         assert struct.questions[0].answer == "整理答案"
@@ -55,10 +51,8 @@ class TestParseStruct:
 
     def test_caps_detected_lists(self):
         many = [{"point": f"p{i}"} for i in range(50)]
-        quotes = [f"q{i}" for i in range(50)]
-        struct = parse_struct({"key_points": many, "highlight_quotes": quotes})
+        struct = parse_struct({"key_points": many})
         assert len(struct.key_points) == 20  # MAX_KEY_POINTS（不限条数，宽容上限）
-        assert len(struct.highlight_quotes) == 20  # MAX_QUOTES（不限条数，宽容上限）
 
     def test_caps_questions_at_max(self):
         many = [{"question": f"q{i}"} for i in range(20)]
@@ -69,8 +63,7 @@ class TestParseStruct:
 class TestStructToDoc:
     def test_round_trips_clean_payload(self):
         raw = {
-            "key_points": [{"point": "观点", "evidence": "证据"}],
-            "highlight_quotes": ["引文"],
+            "key_points": [{"point": "观点", "evidence": "证据", "quote": "原话"}],
             "speaker_intro": "intra",
             "speaker_mapping": {"SPEAKER_00": "A"},
             "keywords": [{"key": "词", "desc": "d"}],
@@ -79,7 +72,7 @@ class TestStructToDoc:
         }
         doc = struct_to_doc(parse_struct(raw))
         assert doc["key_points"][0]["point"] == "观点"
-        assert doc["highlight_quotes"] == ["引文"]
+        assert doc["key_points"][0]["quote"] == "原话"
         assert doc["speaker_mapping"] == {"SPEAKER_00": "A"}
         assert doc["keywords"][0]["key"] == "词"
         assert doc["summary"] == "本期讲求职"
@@ -89,12 +82,10 @@ class TestStructToDoc:
         doc = struct_to_doc(
             parse_struct(
                 {
-                    "key_points": [{"point": "  a  ", "evidence": "  e  "}, {"point": "", "evidence": "x"}],
-                    "highlight_quotes": ["  x  ", ""],
-                    "keywords": [{"key": "", "desc": "d"}],
+                "key_points": [{"point": "  a  ", "evidence": "  e  "}, {"point": "", "evidence": "x"}],
+                "keywords": [{"key": "", "desc": "d"}],
                 }
             )
         )
-        assert doc["key_points"] == [{"point": "a", "evidence": "e"}]
-        assert doc["highlight_quotes"] == ["x"]
+        assert doc["key_points"] == [{"point": "a", "evidence": "e", "quote": ""}]
         assert doc["keywords"] == []

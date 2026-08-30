@@ -36,40 +36,39 @@ def build_output_markdown(doc: OutputDoc) -> str:
         "",
         f"> 来源：{doc.podcast_name} | {doc.title} | {doc.pub_date}",
     ]
-    if doc.show_notes:
-        lines += ["", "# Show Notes", "", doc.show_notes]
+    lines += ["", "## Show Notes", ""]
+    if doc.show_notes and doc.show_notes.strip():
+        lines.append(doc.show_notes)
+    else:
+        lines.append("（无）")
 
     if doc.summary:
         lines += ["", "## 摘要", "", doc.summary]
 
-    lines += ["", "## 内容提要", ""]
+    lines += ["", "## 核心观点", ""]
     for kp in doc.key_points:
         evidence = f"：{kp.evidence}" if kp.evidence else ""
         lines.append(f"- **{kp.point}**{evidence}")
-
-    if doc.highlights:
-        lines += ["", "## 闪光语句", ""]
-        for hl in doc.highlights:
-            ts = f"[{fmt_ts(hl.start_sec)}]" if hl.start_sec is not None else ""
-            speaker = f"（{hl.speaker}）" if hl.speaker else ""
-            meta = f"{ts}{speaker}".strip()
-            prefix = f" {meta}" if meta else ""
-            lines.append(f"-{prefix} 「{hl.content}」")
-    elif doc.highlight_quotes:
-        lines += ["", "## 闪光语句", ""]
-        for q in doc.highlight_quotes:
-            lines.append(f"- {q}")
+        if kp.quote:
+            lines.append(f"  > {kp.quote}")
 
     if doc.questions:
         lines += ["", "## 问题与思考", ""]
-        for q in doc.questions:
-            lines.append(f"- **{q.question}** {q.answer}")
+        for i, q in enumerate(doc.questions, 1):
+            lines.append(f"{i}. {q.question}")
+            if q.answer:
+                lines.append(f"   {q.answer}")
+            if i < len(doc.questions):
+                lines.append("")
 
     if doc.keywords:
         lines += ["", "## 关键词", ""]
         for kw in doc.keywords:
-            desc = f"：{kw.desc}" if kw.desc else ""
-            lines.append(f"- **{kw.key}**{desc}")
+            desc = (kw.desc or "").strip()
+            if desc and not desc.endswith(("。", ".")):
+                desc += "。"
+            sep = "：" if desc else ""
+            lines.append(f"- **{kw.key}**{sep}{desc}")
 
     if doc.speaker_intro:
         lines += ["", "## 人物简介", "", doc.speaker_intro]

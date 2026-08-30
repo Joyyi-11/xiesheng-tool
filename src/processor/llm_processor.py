@@ -8,7 +8,6 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +16,7 @@ from openai import OpenAI
 
 from src.config import LLMConfig
 from src.models.llm_struct import parse_struct
-from src.models.schemas import Highlight, KeyPoint, Keyword, OutputDoc, QuestionItem
+from src.models.schemas import KeyPoint, Keyword, OutputDoc, QuestionItem
 from src.processor.prompt import (
     CLEAN_SYSTEM_PROMPT,
     CLEAN_USER_PROMPT,
@@ -38,14 +37,8 @@ PROMPT_VERSION = 2
 # v4：speaker_mapping 增加「多人混段不映射、保留 [SPEAKER_XX]」约束（Vol.11 错乱修复）。
 STRUCT_PROMPT_VERSION = 4
 MAX_KEYWORDS = 10
-# 闪光语句回匹配时间戳时，非直接包含的最短长度与相似度门槛。
-HIGHLIGHT_MATCH_MIN_CHARS = 8
-HIGHLIGHT_MATCH_MIN_RATIO = 0.6
 
 _TIME_RE = re.compile(r"^(?:(\d+):)?(\d+):(\d+)$")
-
-# 匹配用的中文/英文标点集合
-_MATCH_PUNCT = set("，。！？；：、（）「」『』“”‘’\"'《》〈〉…—·,.!?;:()[]{}【】…—-")
 
 
 class ModelNotFoundError(RuntimeError):
@@ -233,9 +226,6 @@ def process(
     input_tokens += inp
     output_tokens += out
     doc = _build_output_doc(struct, title, podcast_name, pub_date, show_notes, cleaned_transcript)
-    doc.highlights = _attach_highlights(
-        doc.highlight_quotes, segments, struct.get("speaker_mapping", {})
-    )
     return doc, input_tokens, output_tokens
 
 
@@ -628,82 +618,6 @@ def _parse_keywords(data: dict[str, Any]) -> list[Keyword]:
     return [Keyword(key=kw.key, desc=kw.desc) for kw in parse_struct(data).keywords if kw.valid]
 
 
-def _normalize_for_match(text: str) -> str:
-    """Normalize text for verbatim quote matching (strip whitespace/punctuation)."""
-    out: list[str] = []
-    for ch in unicodedata.normalize("NFKC", text):
-        if ch.isspace() or ch in _MATCH_PUNCT:
-            continue
-        out.append(ch)
-    return "".join(out)
-
-
-def _match_quote(quote: str, segments: list[dict]) -> tuple[float | None, str]:
-    """Locate a quote in the (speaker-labeled) segments.
-
-    Returns (start_sec, speaker). (None, "") when the quote cannot be matched
-    confidently.
-    """
-    norm_q = _normalize_for_match(quote)
-    if not norm_q:
-        return None, ""
-    candidates: list[tuple[str, Any, str]] = []
-    for i, seg in enumerate(segments):
-        text = str(seg.get("text", "") or "")
-        start = seg.get("start", seg.get("start_time"))
-        speaker = str(seg.get("speaker", ""))
-        candidates.append((text, start, speaker))
-        if i + 1 < len(segments):
-            nxt = segments[i + 1]
-            candidates.append(
-                (text + " " + str(nxt.get("text", "") or ""), start, speaker)
-            )
-    best_ratio = 0.0
-    best_text_len = 0
-    best: tuple[float | None, str] = (None, "")
-    for text, start, speaker in candidates:
-        norm_text = _normalize_for_match(text)
-        if not norm_text:
-            continue
-        if norm_q in norm_text:
-            ratio = 1.0
-        elif len(norm_q) >= HIGHLIGHT_MATCH_MIN_CHARS:
-            ratio = SequenceMatcher(None, norm_text, norm_q).ratio()
-        else:
-            continue
-        # 同分时优先更短的包含片段：精确命中单个 segment 优于命中“双段拼接”
-        if ratio > best_ratio or (
-            ratio == best_ratio and len(norm_text) < best_text_len
-        ):
-            best_ratio = ratio
-            best_text_len = len(norm_text)
-            start_sec = float(start) if isinstance(start, (int, float)) else None
-            best = (start_sec, speaker)
-    if best_ratio == 0.0 or best_ratio < HIGHLIGHT_MATCH_MIN_RATIO:
-        return None, ""
-    return best
-
-
-def _attach_highlights(
-    quotes: list[str],
-    segments: list[dict] | None,
-    speaker_mapping: dict[str, Any],
-) -> list[Highlight]:
-    """Enrich verbatim quotes with episode start time and (mapped) speaker."""
-    if not quotes or not segments:
-        return [Highlight(content=q) for q in quotes]
-    mapping = speaker_mapping if isinstance(speaker_mapping, dict) else {}
-    highlights: list[Highlight] = []
-    for quote in quotes:
-        start_sec, speaker = _match_quote(quote, segments)
-        display_speaker = ""
-        if speaker:
-            mapped = mapping.get(speaker)
-            display_speaker = mapped if isinstance(mapped, str) and mapped.strip() else speaker
-        highlights.append(Highlight(content=quote, start_sec=start_sec, speaker=display_speaker))
-    return highlights
-
-
 def _build_output_doc(
     data: dict[str, Any],
     title: str,
@@ -715,18 +629,17 @@ def _build_output_doc(
     struct = parse_struct(data)
 
     key_points = [
-        KeyPoint(point=kp.point, evidence=kp.evidence)
+        KeyPoint(point=kp.point, evidence=kp.evidence, quote=kp.quote)
         for kp in struct.key_points
         if kp.valid
     ]
-    quotes = [q for q in struct.highlight_quotes if q]
     speaker_intro = struct.speaker_intro
     speaker_mapping = struct.speaker_mapping or {}
     for speaker, name in speaker_mapping.items():
         if re.fullmatch(r"SPEAKER_\d+", str(speaker)) and isinstance(name, str) and name.strip():
             full_text = re.sub(
                 rf"\[{re.escape(str(speaker))}\]\s*",
-                f"{name.strip()}：",
+                f"【{name.strip()}】",
                 full_text,
             )
     questions = [
@@ -740,7 +653,6 @@ def _build_output_doc(
         pub_date=pub_date,
         show_notes=show_notes,
         key_points=key_points,
-        highlight_quotes=quotes,
         full_text=full_text,
         speaker_intro=speaker_intro,
         keywords=[Keyword(key=kw.key, desc=kw.desc) for kw in struct.keywords if kw.valid],

@@ -24,17 +24,10 @@ class TranscriptResult:
 
 @dataclass
 class KeyPoint:
-    """A single key point with supporting evidence."""
+    """A single core viewpoint with supporting evidence and an optional verbatim quote."""
     point: str
     evidence: str
-
-
-@dataclass
-class Highlight:
-    """A verbatim quote enriched with its location in the episode."""
-    content: str
-    start_sec: float | None = None
-    speaker: str = ""
+    quote: str = ""  # optional verbatim quote from the transcript (忠实原文)
 
 
 @dataclass
@@ -59,10 +52,8 @@ class OutputDoc:
     pub_date: str
     show_notes: str
     key_points: list[KeyPoint]
-    highlight_quotes: list[str] = field(default_factory=list)
     full_text: str = ""  # cleaned and formatted full transcript (Markdown)
     speaker_intro: str = ""  # speaker introduction from Show Notes (Markdown)
-    highlights: list[Highlight] = field(default_factory=list)  # quotes with timestamp/speaker
     keywords: list[Keyword] = field(default_factory=list)
     summary: str = ""  # 2-3 sentence episode summary
     questions: list[QuestionItem] = field(default_factory=list)  # curated Q&A for reflection

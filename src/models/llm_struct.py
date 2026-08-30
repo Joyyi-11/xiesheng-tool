@@ -50,6 +50,7 @@ class KeyPointOut(BaseModel):
     model_config = {"str_strip_whitespace": True}
     point: str = ""
     evidence: str = ""
+    quote: str = ""
 
     @property
     def valid(self) -> bool:
@@ -84,7 +85,6 @@ class StructOut(BaseModel):
     """Whole structured reading-aids payload returned by the LLM."""
 
     key_points: list[KeyPointOut] = Field(default_factory=list)
-    highlight_quotes: list[str] = Field(default_factory=list)
     speaker_intro: str = ""
     speaker_mapping: dict[str, Any] = Field(default_factory=dict)
     keywords: list[KeywordOut] = Field(default_factory=list)
@@ -114,9 +114,6 @@ def parse_struct(raw: dict[str, Any] | None) -> StructOut:
                     continue
         return out[:MAX_KEY_POINTS]
 
-    def quotes() -> list[str]:
-        return [_clean_str(q) for q in _as_list(raw.get("highlight_quotes")) if _clean_str(q)][:MAX_QUOTES]
-
     def keywords() -> list[KeywordOut]:
         out: list[KeywordOut] = []
         for item in _as_list(raw.get("keywords")):
@@ -145,7 +142,6 @@ def parse_struct(raw: dict[str, Any] | None) -> StructOut:
     intro = raw.get("speaker_intro")
     return StructOut(
         key_points=key_points(),
-        highlight_quotes=quotes(),
         speaker_intro=_clean_str(intro) if isinstance(intro, str) else "",
         speaker_mapping=mapping if isinstance(mapping, dict) else {},
         keywords=keywords(),
@@ -158,9 +154,9 @@ def struct_to_doc(struct: StructOut) -> dict[str, Any]:
     """Convert a validated StructOut to the plain-dict form used by build doc."""
     return {
         "key_points": [
-            {"point": k.point, "evidence": k.evidence} for k in struct.key_points if k.valid
+            {"point": k.point, "evidence": k.evidence, "quote": _clean_str(k.quote)}
+            for k in struct.key_points if k.valid
         ],
-        "highlight_quotes": [_clean_str(q) for q in struct.highlight_quotes if _clean_str(q)],
         "speaker_intro": _clean_str(struct.speaker_intro),
         "speaker_mapping": struct.speaker_mapping or {},
         "keywords": [{"key": k.key, "desc": k.desc} for k in struct.keywords if k.valid],

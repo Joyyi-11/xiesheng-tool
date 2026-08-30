@@ -102,6 +102,17 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
         timers["download"] = t.elapsed
 
         # --- Step 3: Transcribe (复用 transcriber，模型只加载一次) ---
+        # 从 Show Notes 解析预期说话人数，作为 diarization 的 K 锚点
+        # （常规两人播客：主播 + 单嘉宾；显式 --speakers 优先覆盖）。
+        from src.diarization.show_notes_speakers import parse_speakers_from_show_notes
+
+        _detected = parse_speakers_from_show_notes(episode.show_notes)
+        num_speakers = args.speakers if args.speakers else (len(_detected) if _detected else None)
+        if _detected:
+            logger.info(
+                "Step 3: Show Notes 识别到 %d 位说话人（%s），diarization 强制聚成 %s 类",
+                len(_detected), "、".join(_detected), num_speakers,
+            )
         with Timer() as t:
             logger.info("Step 3/6: 本地转录中（FunASR %s, CPU）...", args.model)
             transcript = transcriber.transcribe(
@@ -109,6 +120,7 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                 duration_sec,
                 work_dir=output_dir / ".work" / safe_name,
                 jobs=args.jobs,
+                num_speakers=num_speakers,
             )
             tracker.add_transcription(transcript.cost_yuan)
         timers["transcribe"] = t.elapsed
@@ -143,7 +155,7 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                     )
 
                     logger.info("Step 4/6: 说话人日志（Speaker Diarization，独立模块）...")
-                    diarization_segments = run_diarization(wav_file, num_speakers=args.speakers)
+                    diarization_segments = run_diarization(wav_file, num_speakers=num_speakers)
                     labeled_segments = assign_speakers(transcript.segments, diarization_segments)
                 try:
                     transcript_text = format_labeled_segments(labeled_segments)
@@ -276,7 +288,7 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
             print(f"  总耗时: {fmt_time(total_time)}")
             print(f"  费用: {tracker.summary()}")
             print(f"  要点数: {len(doc.key_points)}")
-            print(f"  闪光语句: {len(doc.highlight_quotes)}")
+            print(f"  核心观点（含原话）: {len([kp for kp in doc.key_points if kp.quote])}")
             print(f"{'='*50}")
 
         return True

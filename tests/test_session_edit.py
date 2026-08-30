@@ -2,6 +2,7 @@
 
 from src.processor.session_edit import (
     REQUIRED_HEADINGS,
+    SESSION_RULES,
     SESSION_SPEC_VERSION,
     build_session_prompt,
     validate_session_output,
@@ -11,7 +12,7 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 
 > 来源：起朱楼宴宾客 | 174. 我们还能给算法当多久的品味老师？｜对谈亚马逊AGI查晟 | 2026-07-21
 
-# Show Notes
+## Show Notes
 
 这是一期对谈节目，嘉宾是亚马逊 AGI 优化与研究团队负责人查晟。
 
@@ -19,29 +20,29 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 
 本期对谈亚马逊 AGI 查晟，围绕开源大模型、模型塌缩与人类品味在 AI 时代的角色展开。
 
-## 内容提要
+## 核心观点
 
 - **中国团队坚持开源大模型。** 但缺乏数据分发。
 - **模型塌缩不可避免。** 关键在于对 AI 数据的筛选。
 - **AI 无法替代人类品味。** 目前 AI 更需要的是 harness。
 
-## 闪光语句
-
-- **品味**：这是一种很稀缺的能力。
-- **prompt**：这是一个 prompt，最终被 AI 写的。
-
 ## 问题与思考
 
-- **① 开源模型最大的结构性缺陷是什么？** 无法从用户使用回流训练数据，数据飞轮转不起来。
-- **② 模型塌缩可控吗？** 关键在于对生成数据做质量过滤与多样性控制，维持多样性。
+1. 开源模型最大的结构性缺陷是什么？
+
+   无法从用户使用回流训练数据，数据飞轮转不起来。
+
+2. 模型塌缩可控吗？
+
+   关键在于对生成数据做质量过滤与多样性控制，维持多样性。
 
 ## 关键词
 
-- **数据飞轮**：开源模型无法从用户回流数据的结构性缺陷
-- **模型塌缩**：AI 用生成数据训练导致能力退化的现象
-- **认知负债**：过度依赖 AI 导致思考能力下降
-- **主权 AI**：各国训练符合自身价值观的大模型
-- **品味（Taste）**：人类定义问题与指引优化的能力
+- **数据飞轮**：开源模型无法从用户回流数据的结构性缺陷。
+- **模型塌缩**：AI 用生成数据训练导致能力退化的现象。
+- **认知负债**：过度依赖 AI 导致思考能力下降。
+- **主权 AI**：各国训练符合自身价值观的大模型。
+- **品味（Taste）**：人类定义问题与指引优化的能力。
 
 ## 人物简介
 
@@ -50,9 +51,9 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 
 ## 全文转录
 
-**主播**：大家好，欢迎来到我的博客节目。
+【主播】大家好，欢迎来到我的博客节目。
 
-**嘉宾**：谢谢，我最近在波士顿参加学术会议。
+【嘉宾】谢谢，我最近在波士顿参加学术会议。
 """
 
 
@@ -64,10 +65,9 @@ def test_build_session_prompt_wraps_package():
     package = "# 测试标题\n\n> 来源：测试播客  |  2026-01-01\n\n[SPEAKER_00] 你好。"
     prompt = build_session_prompt(package)
     assert "会话内校订规范" in prompt
-    assert "# Show Notes" in prompt
+    assert "## Show Notes" in prompt
     assert "## 摘要" in prompt
-    assert "## 内容提要" in prompt
-    assert "## 闪光语句" in prompt
+    assert "## 核心观点" in prompt
     assert "## 问题与思考" in prompt
     assert "## 关键词" in prompt
     assert "## 人物简介" in prompt
@@ -86,9 +86,9 @@ def test_validate_accepts_with_source_leniency():
 
 
 def test_validate_rejects_missing_heading():
-    bad = GOLDEN.replace("## 闪光语句", "")
+    bad = GOLDEN.replace("## 核心观点", "")
     problems = validate_session_output(bad)
-    assert any("闪光语句" in p for p in problems)
+    assert any("核心观点" in p for p in problems)
 
 
 def test_validate_rejects_missing_summary():
@@ -100,8 +100,10 @@ def test_validate_rejects_missing_summary():
 def test_validate_rejects_missing_questions():
     bad = GOLDEN.replace(
         "## 问题与思考\n\n"
-        "- **① 开源模型最大的结构性缺陷是什么？** 无法从用户使用回流训练数据，数据飞轮转不起来。\n"
-        "- **② 模型塌缩可控吗？** 关键在于对生成数据做质量过滤与多样性控制，维持多样性。\n\n",
+        "1. 开源模型最大的结构性缺陷是什么？\n\n"
+        "   无法从用户使用回流训练数据，数据飞轮转不起来。\n\n"
+        "2. 模型塌缩可控吗？\n\n"
+        "   关键在于对生成数据做质量过滤与多样性控制，维持多样性。\n\n",
         "",
     )
     problems = validate_session_output(bad)
@@ -110,10 +112,10 @@ def test_validate_rejects_missing_questions():
 
 def test_validate_rejects_too_few_keywords():
     bad = GOLDEN.replace(
-        "- **模型塌缩**：AI 用生成数据训练导致能力退化的现象\n"
-        "- **认知负债**：过度依赖 AI 导致思考能力下降\n"
-        "- **主权 AI**：各国训练符合自身价值观的大模型\n"
-        "- **品味（Taste）**：人类定义问题与指引优化的能力\n",
+        "- **模型塌缩**：AI 用生成数据训练导致能力退化的现象。\n"
+        "- **认知负债**：过度依赖 AI 导致思考能力下降。\n"
+        "- **主权 AI**：各国训练符合自身价值观的大模型。\n"
+        "- **品味（Taste）**：人类定义问题与指引优化的能力。\n",
         "",
     )
     problems = validate_session_output(bad)
@@ -122,7 +124,7 @@ def test_validate_rejects_too_few_keywords():
 
 def test_validate_rejects_leftover_speaker_labels():
     bad = GOLDEN.replace(
-        "**主播**：大家好", "[SPEAKER_00] 大家好"
+        "【主播】大家好", "[SPEAKER_00] 大家好"
     )
     problems = validate_session_output(bad)
     assert any("SPEAKER" in p for p in problems)
@@ -138,7 +140,7 @@ def test_validate_rejects_source_without_three_parts():
 
 
 def test_validate_rejects_missing_show_notes():
-    bad = GOLDEN.replace("# Show Notes\n\n这是一期对谈节目，嘉宾是亚马逊 AGI 优化与研究团队负责人查晟。\n\n", "")
+    bad = GOLDEN.replace("## Show Notes\n\n这是一期对谈节目，嘉宾是亚马逊 AGI 优化与研究团队负责人查晟。\n\n", "")
     problems = validate_session_output(bad)
     assert any("Show Notes" in p for p in problems)
 
@@ -153,16 +155,82 @@ def test_validate_rejects_quote_intro_format():
 
 
 def test_validate_rejects_overly_short_transcript():
-    short = GOLDEN.replace("**主播**：大家好，欢迎来到我的博客节目。", "**主播**：大家好。")
+    short = GOLDEN.replace("【主播】大家好，欢迎来到我的博客节目。", "【主播】大家好。")
     problems = validate_session_output(short, source_text="原文" * 100)
     assert any("过度删减" in p for p in problems)
 
 
+def test_validate_rejects_outline_section():
+    bad = GOLDEN + "\n## 大纲\n\n- 一些要点\n"
+    problems = validate_session_output(bad)
+    assert any("大纲" in p for p in problems)
+
+
+def test_validate_rejects_mermaid_diagram():
+    bad = GOLDEN + "\n```mermaid\nmindmap\n  root\n```\n"
+    problems = validate_session_output(bad)
+    assert any("mermaid" in p for p in problems)
+
+
+def test_strip_unwanted_sections_removes_outline_and_mermaid():
+    from src.processor.session_edit import _strip_unwanted_sections
+
+    md = (
+        GOLDEN
+        + "\n## 大纲\n\n- 要点\n\n```mermaid\nmindmap\n  root\n```\n\n"
+        + "## 全文转录\n\n【主播】x。\n"
+    )
+    cleaned = _strip_unwanted_sections(md)
+    assert "## 大纲" not in cleaned
+    assert "mermaid" not in cleaned
+    assert "【主播】x。" in cleaned
+
+
+def test_validate_flags_speaker_label_mismatch():
+    bad = GOLDEN.replace(
+        "【嘉宾】谢谢，我最近在波士顿参加学术会议。",
+        "【主播】谢谢，我是 ACE，最近在波士顿参加学术会议。",
+    )
+    problems = validate_session_output(bad)
+    assert any("说话人标签错位" in p for p in problems)
+
+
+def test_validate_flags_dunhao_between_quoted_items():
+    bad = GOLDEN.replace(
+        "本期对谈亚马逊 AGI 查晟，围绕开源大模型、模型塌缩与人类品味在 AI 时代的角色展开。",
+        "本期对谈「开源」、「回流」与「模型塌缩」。",
+    )
+    problems = validate_session_output(bad)
+    assert any("不应使用顿号" in p for p in problems)
+
+
+def test_validate_flags_speaker_imbalance():
+    # 两人对话里某人独占绝大多数段落，疑似 diarization 过度切分 / 标签归并错误
+    md = (
+        "# 标题\n\n> 来源：播客 | 标题 | 2026-08-28\n\n"
+        "## Show Notes\n\n简介\n\n## 摘要\n\n本期聊求职。\n\n"
+        "## 核心观点\n\n- **要点。** 证据\n\n"
+        "## 问题与思考\n\n1. 找不到工作是谁的问题？\n\n   策略错位。\n\n"
+        "## 关键词\n\n- **术语**：解释。\n\n"
+        "## 人物简介\n\n**主播**：湫湫\n\n"
+        "## 全文转录\n\n"
+        + "\n\n".join(f"【嘉宾吱吱】第{i}句内容。" for i in range(9))
+        + "\n\n【主播湫湫】最后一句话。"
+    )
+    problems = validate_session_output(md)
+    assert any("占比失衡" in p for p in problems)
+
+
+def test_session_rules_warn_mid_phrase_period():
+    # 校订规则须提示「连贯短语中途被句号切断」类断句错误
+    assert "好不好找工作" in SESSION_RULES
+
+
 def test_required_headings_are_exported():
     assert REQUIRED_HEADINGS == (
+        "## Show Notes",
         "## 摘要",
-        "## 内容提要",
-        "## 闪光语句",
+        "## 核心观点",
         "## 问题与思考",
         "## 关键词",
         "## 人物简介",

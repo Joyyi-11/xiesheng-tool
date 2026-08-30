@@ -48,13 +48,14 @@ class HttpTranscriber(Transcriber):
         self.model_name = model_name
         self.timeout = timeout
 
-    def transcribe(self, audio_path, duration_sec=None, *, work_dir=None, jobs=1) -> TranscriptResult:
+    def transcribe(self, audio_path, duration_sec=None, *, work_dir=None, jobs=1, num_speakers=None) -> TranscriptResult:
         import requests
 
         payload = {
             "audio": str(audio_path),
             "duration_sec": duration_sec,
             "work_dir": str(work_dir) if work_dir else None,
+            "num_speakers": num_speakers,
         }
         resp = requests.post(f"{self.base_url}/transcribe", json=payload, timeout=self.timeout)
         if resp.status_code != 200:
@@ -109,6 +110,7 @@ class _Handler(BaseHTTPRequestHandler):
                     Path(audio),
                     duration_sec=payload.get("duration_sec"),
                     work_dir=Path(payload["work_dir"]) if payload.get("work_dir") else None,
+                    num_speakers=payload.get("num_speakers"),
                 )
             self._json(200, {
                 "raw_text": result.raw_text,

@@ -8,12 +8,10 @@ import openai
 import pytest
 
 from src.processor.llm_processor import (
-    _attach_highlights,
     _build_output_doc,
     _clean_chunk_worker,
     _is_model_not_found,
     _load_cached_chunk,
-    _match_quote,
     _parse_keywords,
     _parse_start_sec,
     _probe_model,
@@ -31,10 +29,9 @@ class TestBuildOutputDoc:
     def test_builds_key_points_and_quotes(self):
         data = {
             "key_points": [
-                {"point": "核心观点一", "evidence": "这是支撑证据第一句。"},
-                {"point": "重要数据", "evidence": "数据显示增长50%。"},
+                {"point": "核心观点一", "evidence": "这是支撑证据第一句。", "quote": "这是第一句原话。"},
+                {"point": "重要数据", "evidence": "数据显示增长50%。", "quote": "这是第二句原话。"},
             ],
-            "highlight_quotes": ["这是第一句闪光语句。", "这是第二句闪光语句。"],
             "speaker_intro": "> **主持人**：Nina，主播",
             "speaker_mapping": {"SPEAKER_00": "主持人Nina"},
         }
@@ -46,15 +43,14 @@ class TestBuildOutputDoc:
         assert len(doc.key_points) == 2
         assert doc.key_points[0].point == "核心观点一"
         assert doc.key_points[1].evidence == "数据显示增长50%。"
-        assert len(doc.highlight_quotes) == 2
-        assert doc.highlight_quotes[0] == "这是第一句闪光语句。"
+        assert doc.key_points[0].quote == "这是第一句原话。"
+        assert doc.key_points[1].quote == "这是第二句原话。"
         assert "Nina" in doc.speaker_intro
-        assert "主持人Nina：你好。" in doc.full_text
+        assert "【主持人Nina】你好。" in doc.full_text
 
     def test_empty_data_yields_empty_doc(self):
         doc = _build_output_doc({}, "标题", "播客", "2026-01-01", "", "正文")
         assert len(doc.key_points) == 0
-        assert len(doc.highlight_quotes) == 0
         assert doc.speaker_intro == ""
         assert doc.full_text == "正文"
 
@@ -65,12 +61,10 @@ class TestBuildOutputDoc:
                 {"evidence": "没有 point 字段"},
                 "不是字典",
             ],
-            "highlight_quotes": ["有效引用", "", "   "],
         }
         doc = _build_output_doc(data, "T", "P", "2026-01-01", "", "")
         assert len(doc.key_points) == 1
         assert doc.key_points[0].point == "有效"
-        assert len(doc.highlight_quotes) == 1
 
     def test_speaker_intro_not_string_is_ignored(self):
         doc = _build_output_doc({"speaker_intro": 123}, "T", "P", "2026-01-01", "", "")
@@ -131,7 +125,7 @@ class TestChunkProcessing:
             "",
             "[SPEAKER_00] 你好。\n[SPEAKER_01] 你好。",
         )
-        assert "主播连漪：你好。" in doc.full_text
+        assert "【主播连漪】你好。" in doc.full_text
         assert "[SPEAKER_01]" in doc.full_text
 
 
@@ -194,51 +188,6 @@ class TestParsingKeywords:
     def test_missing_or_non_list_returns_empty(self):
         assert _parse_keywords({}) == []
         assert _parse_keywords({"keywords": "不是列表"}) == []
-
-
-class TestHighlightMatching:
-    SEGMENTS = [
-        {"speaker": "SPEAKER_00", "text": "今天我们聊聊人工智能。", "start": 10.0, "end": 14.0},
-        {"speaker": "SPEAKER_01", "text": "大模型确实改变了很多东西。", "start": 16.0, "end": 20.0},
-        {"speaker": "SPEAKER_01", "text": "大家好，欢迎收听本期节目。", "start": 22.0, "end": 26.0},
-    ]
-
-    def test_matches_exact_quote_with_punctuation_normalization(self):
-        start, speaker = _match_quote("今天我们聊聊人工智能。", self.SEGMENTS)
-        assert start == 10.0
-        assert speaker == "SPEAKER_00"
-
-    def test_matches_spanning_two_segments(self):
-        start, speaker = _match_quote("大模型确实改变了很多东西。", self.SEGMENTS)
-        assert start == 16.0
-        assert speaker == "SPEAKER_01"
-
-    def test_unmatched_quote_returns_none(self):
-        start, speaker = _match_quote("完全不存在的句子。", self.SEGMENTS)
-        assert start is None
-        assert speaker == ""
-
-    def test_short_quote_only_matches_as_exact_substring(self):
-        # 过短（<8 字）无法走模糊匹配；不是逐字子串则不应命中
-        start, speaker = _match_quote("无法匹配", self.SEGMENTS)
-        assert start is None
-        assert speaker == ""
-
-    def test_attach_highlights_with_mapping(self):
-        highlights = _attach_highlights(
-            ["今天我们聊聊人工智能。", "完全不存在的一句话。"],
-            self.SEGMENTS,
-            {"SPEAKER_00": "主持人连漪"},
-        )
-        assert highlights[0].start_sec == 10.0
-        assert highlights[0].speaker == "主持人连漪"
-        assert highlights[1].start_sec is None
-        assert highlights[1].speaker == ""
-
-    def test_attach_highlights_without_segments_keeps_plain(self):
-        highlights = _attach_highlights(["一句话。"], None, {})
-        assert highlights[0].start_sec is None
-        assert highlights[0].speaker == ""
 
 
 class FakeChoice:

@@ -63,7 +63,7 @@ class TestBuildDraft:
         diarized.write_text(SAMPLE_PACKAGE, encoding="utf-8")
         draft = build_draft(diarized, {})
         assert draft.startswith("# 例话：AI 协作实践\n")
-        for heading in ("## 摘要", "## 内容提要", "## 闪光语句",
+        for heading in ("## 摘要", "## 核心观点",
                         "## 问题与思考", "## 关键词", "## 人物简介"):
             assert heading in draft and PLACEHOLDER_MARK in draft
         assert "## 全文转录" in draft
@@ -81,7 +81,7 @@ class TestBuildDraft:
         diarized = tmp_path / "节目_diarized.txt"
         diarized.write_text(SAMPLE_PACKAGE, encoding="utf-8")
         draft = build_draft(diarized, {"SPEAKER_00": "主播"})
-        assert "**主播**：大家好，欢迎收听。" in draft
+        assert "【主播】大家好，欢迎收听。" in draft
 
 
 class TestAnalyzeOne:

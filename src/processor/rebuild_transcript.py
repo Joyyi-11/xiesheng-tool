@@ -20,7 +20,7 @@
     python -m src.processor.rebuild_transcript output/<节目>_diarized.txt \\
         --speaker-map "SPEAKER_00:主播 Jean,SPEAKER_01:嘉宾姨姨" -o output/<节目>.md
 
-    # 只替换既有 .md 的全文转录段（保留已校订的摘要/内容提要等章节）
+    # 只替换既有 .md 的全文转录段（保留已校订的摘要/核心观点等章节）
     python -m src.processor.rebuild_transcript output/<节目>_diarized.txt -o output/<节目>.md --replace-transcript
 
 说明：本工具只做保真重建，不做 ASR 纠错（错字、专名、填充词删除仍由校订阶段
@@ -84,7 +84,8 @@ def build_transcript(segs: list[tuple[str, str]], speaker_map: dict[str, str]) -
 
     Returns the transcript body (no trailing blank line). Without a mapping the
     original ``[SPEAKER_XX]`` labels are kept so the editor can still attribute
-    by content; with a mapping they become ``**名字**：`` markers.
+    by content; with a mapping they become ``【名字】`` markers (v9 方括号格式，
+    无冒号、无加粗，与 ``session_edit.SESSION_RULES`` 一致）。
     """
     merged: list[tuple[str, str]] = []
     for label, text in segs:
@@ -99,7 +100,7 @@ def build_transcript(segs: list[tuple[str, str]], speaker_map: dict[str, str]) -
     for label, text in merged:
         name = speaker_map.get(label, "")
         if name:
-            out.append(f"**{name}**：{text}")
+            out.append(f"【{name}】{text}")
         else:
             out.append(f"[{label}] {text}")
     return "\n\n".join(out)

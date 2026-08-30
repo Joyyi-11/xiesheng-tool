@@ -73,7 +73,7 @@ class TestBuildTranscript:
 
     def test_speaker_map_renames_labels(self):
         body = build_transcript([("SPEAKER_00", "你好")], {"SPEAKER_00": "主播"})
-        assert "**主播**：你好" in body
+        assert "【主播】你好" in body
         assert "[SPEAKER_00]" not in body
 
     def test_no_trailing_blank_line(self):

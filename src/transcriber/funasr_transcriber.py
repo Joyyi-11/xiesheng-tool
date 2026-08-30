@@ -509,7 +509,7 @@ class FunASRTranscriber(Transcriber):
         gc.collect()
 
     # --- core ---
-    def transcribe(self, audio_path, duration_sec=None, *, work_dir=None, jobs=1) -> TranscriptResult:
+    def transcribe(self, audio_path, duration_sec=None, *, work_dir=None, jobs=1, num_speakers=None) -> TranscriptResult:
         audio_path = Path(audio_path)
         duration_sec = duration_sec or _audio_duration_sec(audio_path)
         self._write_status(work_dir, "start", 0.0, "开始转录")
@@ -532,7 +532,7 @@ class FunASRTranscriber(Transcriber):
         # 长音频走分段路径（规避整段一次性 generate 的 CPU MemoryError）；
         # 短音频仍整段一次，省去切片与跨段对齐开销。
         if duration_sec and duration_sec > CHUNK_SEC * CHUNK_MARGIN:
-            segments = self._transcribe_chunked(audio_path, duration_sec, work_dir, jobs)
+            segments = self._transcribe_chunked(audio_path, duration_sec, work_dir, jobs, num_speakers=num_speakers)
         else:
             self._ensure_loaded()
             self._write_status(work_dir, "loaded", 0.05, "模型已加载")
@@ -579,7 +579,7 @@ class FunASRTranscriber(Transcriber):
         res = self._model.generate(input=str(audio_path), batch_size_s=self.batch_size_s)
         return self._build_segments(res, postprocess=_strip_sensevoice_tags, add_punc=False)
 
-    def _transcribe_chunked(self, audio_path: Path, duration_sec: float, work_dir, jobs: int = 1) -> list[dict]:
+    def _transcribe_chunked(self, audio_path: Path, duration_sec: float, work_dir, jobs: int = 1, num_speakers: int | None = None) -> list[dict]:
         """分段转写 + 跨段说话人全局对齐（长音频，修复整段一次性转写 OOM）。
 
         流程：
@@ -621,7 +621,7 @@ class FunASRTranscriber(Transcriber):
 
         if rep_clips:
             self._write_status(work_dir, "align", 0.92, "跨段说话人对齐中")
-            mapping = self._align_speakers(rep_clips)
+            mapping = self._align_speakers(rep_clips, num_speakers)
             for s in all_segments:
                 spk = s.get("speaker")
                 if spk and "_chunk_idx" in s:
@@ -800,39 +800,102 @@ class FunASRTranscriber(Transcriber):
                 reps.append({"audio": str(p), "key": (chunk_idx, local)})
         return reps
 
-    def _align_speakers(self, reps: list[dict]) -> dict[tuple[int, int], int]:
-        """用 cam++ SV 对代表片段两两打分、贪心聚类。
+    def _align_speakers(self, reps: list[dict], num_speakers: int | None = None) -> dict[tuple[int, int], int]:
+        """用 cam++ SV 对代表片段两两打分，聚类为全局说话人。
+
+        - ``num_speakers`` 为 None：保持原贪心 + ``SV_THRESHOLD`` 行为（自动检测，
+          碎几类算几类）。
+        - ``num_speakers`` 已知（如来自 Show Notes）：在相似度矩阵上做 K-medoids
+          **强制聚成 K 类**，根治「两人对话被切成 14 个伪说话人」的过度切分
+          （vol.231 根因）。cam++ 把同一人两段打成 0.28（< 门槛）也能被强行归并。
 
         Returns {(chunk_idx, local_spk): global_id}.
         """
+        if not reps:
+            return {}
         sv = self._ensure_sv_loaded()
+        n = len(reps)
+        # 两两相似度矩阵（相似度越高越可能是同一人）
+        sim = [[0.0] * n for _ in range(n)]
+        for i in range(n):
+            sim[i][i] = 1.0
+            for j in range(i + 1, n):
+                try:
+                    res = sv.inference_sv(reps[i]["audio"], reps[j]["audio"])
+                    s = self._sv_score(res)
+                except Exception as exc:
+                    logger.debug("inference_sv failed: %s", exc)
+                    s = -1.0
+                if s < 0:
+                    s = 0.0
+                sim[i][j] = sim[j][i] = s
+
+        if num_speakers is None:
+            return self._greedy_cluster(reps, sim)
+        k = max(1, min(int(num_speakers), n))
+        if k >= n:
+            # 已知人数 >= 代表片段数，直接 1:1 映射
+            return {rep["key"]: gid for gid, rep in enumerate(reps)}
+        assign = self._kmedoids(sim, k)
+        mapping: dict[tuple[int, int], int] = {}
+        for idx, rep in enumerate(reps):
+            mapping[rep["key"]] = assign[idx]
+        logger.info(
+            "跨段说话人对齐（强制 %d 类）：%d 个全局说话人（来自 %d 个代表片段）",
+            k, len(set(assign)), n,
+        )
+        return mapping
+
+    @staticmethod
+    def _greedy_cluster(reps: list[dict], sim: list[list[float]]) -> dict[tuple[int, int], int]:
+        """原行为：贪心 + SV_THRESHOLD，同人归并、否则开新簇。"""
         clusters: list[dict] = []
-        for rep in reps:
+        for idx, rep in enumerate(reps):
             best_score = -1.0
             best_cluster = None
             for c in clusters:
-                try:
-                    res = sv.inference_sv(c["audio"], rep["audio"])
-                    score = self._sv_score(res)
-                except Exception as exc:
-                    logger.debug("inference_sv failed: %s", exc)
-                    score = -1.0
-                if score > best_score:
-                    best_score = score
+                s = sim[c["idx"]][idx]
+                if s > best_score:
+                    best_score = s
                     best_cluster = c
             if best_cluster is not None and best_score >= SV_THRESHOLD:
                 best_cluster["members"].append(rep["key"])
             else:
-                clusters.append({"audio": rep["audio"], "members": [rep["key"]]})
+                clusters.append({"idx": idx, "members": [rep["key"]]})
         mapping: dict[tuple[int, int], int] = {}
         for gid, c in enumerate(clusters):
             for key in c["members"]:
                 mapping[key] = gid
-        logger.info(
-            "跨段说话人对齐完成：%d 个全局说话人（来自 %d 个代表片段）",
-            len(clusters), len(reps),
-        )
         return mapping
+
+    @staticmethod
+    def _kmedoids(sim: list[list[float]], k: int, max_iter: int = 25) -> list[int]:
+        """在相似度矩阵上做 K-medoids（相似度越高越「近」）。返回每点的簇号。"""
+        n = len(sim)
+        # 初始化：max-min 选 k 个彼此最不相似的 medoids（相似度最小）
+        medoids = [0]
+        while len(medoids) < k:
+            cand = min(
+                (i for i in range(n) if i not in medoids),
+                key=lambda x: max(sim[x][m] for m in medoids),
+                default=None,
+            )
+            if cand is None:
+                break
+            medoids.append(cand)
+        for _ in range(max_iter):
+            assign = [max(range(k), key=lambda c: sim[i][medoids[c]]) for i in range(n)]
+            new_medoids = []
+            for c in range(k):
+                members = [i for i in range(n) if assign[i] == c]
+                if not members:
+                    new_medoids.append(medoids[c])
+                    continue
+                new_medoids.append(max(members, key=lambda i: sum(sim[i][j] for j in members)))
+            if new_medoids == medoids:
+                break
+            medoids = new_medoids
+        return [max(range(k), key=lambda c: sim[i][medoids[c]]) for i in range(n)]
 
     @staticmethod
     def _sv_score(res) -> float:
