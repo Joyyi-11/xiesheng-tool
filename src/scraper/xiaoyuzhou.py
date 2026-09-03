@@ -213,18 +213,25 @@ def _find_pub_date_from_json_ld(soup: BeautifulSoup) -> str | None:
 
 
 def _extract_date_from_ld(data: dict) -> str | None:
-    """Extract pub date from JSON-LD, converting UTC to China time (UTC+8)."""
+    """Extract pub date from JSON-LD.
+
+    仅对带时区的 aware 时间做 UTC→中国时间（UTC+8）转换；naive 时间来源未给时区，
+    不臆测成 UTC 后再按本地时区偏移（否则非中国时区/naive 日期可能被移动一天），
+    原样返回日期。
+    """
     for key in ("datePublished", "dateCreated", "pubDate"):
         val = data.get(key)
-        if val:
-            # Parse ISO date, convert UTC to China timezone
-            try:
-                dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
-                china_tz = timezone(timedelta(hours=8))
-                dt_china = dt.astimezone(china_tz)
-                return dt_china.strftime("%Y-%m-%d")
-            except (ValueError, AttributeError):
-                return str(val)[:10]
+        if not val:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+        except ValueError:
+            return str(val)[:10]
+        if dt.tzinfo is None:
+            # naive：来源未标注时区，原样返回，不偏移。
+            return str(val)[:10]
+        china_tz = timezone(timedelta(hours=8))
+        return dt.astimezone(china_tz).strftime("%Y-%m-%d")
     for item in data.get("@graph", []):
         d = _extract_date_from_ld(item)
         if d:

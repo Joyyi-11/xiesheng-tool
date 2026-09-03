@@ -23,11 +23,19 @@ class TranscriptResult:
 
 
 @dataclass
+class TermDef:
+    """A term/concept definition attached to a key point (rendered as an indented sub-item)."""
+    term: str
+    desc: str = ""
+
+
+@dataclass
 class KeyPoint:
     """A single core viewpoint with supporting evidence and an optional verbatim quote."""
     point: str
     evidence: str
-    quote: str = ""  # optional verbatim quote from the transcript (忠实原文)
+    quote: str = ""  # optional verbatim quote from the transcript (忠实原文，渲染为行内直角引号)
+    terms: list[TermDef] = field(default_factory=list)  # 观点内特有术语的就近解释
 
 
 @dataclass
@@ -39,7 +47,12 @@ class Keyword:
 
 @dataclass
 class QuestionItem:
-    """A curated question + synthesized answer for the 问题与思考 section."""
+    """A curated question + direct-answer for the 问题与思考 section.
+
+    The answer must directly resolve the question (no trailing new question
+    thrown back at the reader) and state any referenced speaker's name + role
+    on first mention.
+    """
     question: str
     answer: str = ""
 
@@ -59,3 +72,4 @@ class OutputDoc:
     questions: list[QuestionItem] = field(default_factory=list)  # curated Q&A for reflection
     costs: dict = field(default_factory=dict)  # {"transcription": 0.0, "llm": 0.0}
     timings: dict = field(default_factory=dict)  # {"scrape": 0, "transcribe": 0, "process": 0}
+    warnings: list[str] = field(default_factory=list)  # non-fatal quality degradation markers

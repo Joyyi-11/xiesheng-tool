@@ -20,9 +20,10 @@ in its FunASR output path).
 
 Cross-chunk speaker consistency: ``SPEAKER_xx`` labels are local to each
 ``generate`` call, so chunk boundaries would silently swap identities. We
-collect the longest utterance of every local speaker as a representative clip,
-score all pairs with the cam++ SV model (``inference_sv``), greedily cluster
-them into global speaker ids, and remap every segment. Without this, chunked
+collect a representative clip per local speaker, extract its cam++ speaker
+embedding (``generate`` → ``spk_embedding``), score all pairs by cosine
+similarity, greedily cluster (or K-medoids when the speaker count is known)
+into global speaker ids, and remap every segment. Without this, chunked
 transcription of a 2-speaker show could interleave labels wrongly.
 
 Segment granularity is controlled by ``spk_max_seg_ms`` (VAD 段上限，默认 4000ms):
@@ -68,6 +69,15 @@ CHUNK_SEC = 600  # 10 分钟
 CHUNK_MARGIN = 1.2
 # cam++ 说话人相似度阈值：>= 该值判为同一人（官方常用 0.3）。
 SV_THRESHOLD = 0.31
+# 代表片段（跨段对齐用）的合理时长区间（秒）。cam++ 对超长片段提取的 embedding
+# 没有区分度——求职别慌一期因时间戳异常切出 120/450/510 秒的片段，相似度矩阵
+# 直接退化；过短片段同样撑不起声纹。区间内取最长，区间外的退化规则见 _rep_better。
+REP_CLIP_MIN_SEC = 3.0
+REP_CLIP_MAX_SEC = 30.0
+# 时间戳单位解析版本号，纳入转写缓存指纹。to_sec 改为整批统一单位后，存量 chunk
+# 缓存里的时间戳仍是旧口径，必须让它自动失效重转，否则改动静默不生效（与
+# spk_max_seg_ms / batch_size_s 同一模式）。
+TS_UNIT_VERSION = 2
 # 单个分块转写的偶发失败重试：指数退避；OOM 类错误不重试。
 CHUNK_RETRIES = 3
 CHUNK_RETRY_BASE_S = 2.0
@@ -153,14 +163,14 @@ def _init_chunk_worker(model_name: str, spk_max_seg_ms: int, batch_size_s: int, 
     _WORKER_TRANSCRIBER = tr
 
 
-def _chunk_worker_transcribe(chunk_path: str, chunk_idx: int) -> list[dict]:
+def _chunk_worker_transcribe(chunk_path: str, chunk_idx: int, no_diarization: bool = False) -> list[dict]:
     """单个分块转写任务（在 worker 进程执行）；偶发错误指数退避重试，OOM 不重试。"""
     for attempt in range(1, CHUNK_RETRIES + 1):
         try:
-            return _WORKER_TRANSCRIBER._transcribe_whole(Path(chunk_path))
+            return _WORKER_TRANSCRIBER._transcribe_whole(Path(chunk_path), no_diarization=no_diarization)
         except MemoryError:
             raise
-        except Exception as exc:
+        except Exception:
             if attempt >= CHUNK_RETRIES:
                 raise
             wait = CHUNK_RETRY_BASE_S * (2 ** (attempt - 1))
@@ -276,8 +286,10 @@ class FunASRTranscriber(Transcriber):
                 disable_update=True,
                 ignore_instances=True,
             )
-            # 标点模型与 SenseVoice 解耦，单独懒加载以便公平补齐标点
-            # （见 _get_punc_model），避免启动时与组合内 punc 同时驻留两份。
+            # SenseVoice 组合（AutoModel）已内置 punc_model，generate 内部已完成标点。
+            # 外部 AddPunc 已对 SenseVoice 关闭（见 _transcribe_whole），避免对已带标点的
+            # 文本二次补标点产生双标点（如 。。/？？）。_punc_enabled 仅保留独立 ct-punc
+            # 懒加载能力，当前 SenseVoice 路径不再触发。
             self._punc_enabled = True
             self._punc_model_arg = punc
         else:  # paraformer-large
@@ -363,7 +375,7 @@ class FunASRTranscriber(Transcriber):
     def _cache_dir(self, work_dir: Path | None) -> Path | None:
         return (work_dir / "transcribe") if work_dir else None
 
-    def _load_cache(self, work_dir, audio_path, model_name) -> dict | None:
+    def _load_cache(self, work_dir, audio_path, model_name, num_speakers=None) -> dict | None:
         cache_dir = self._cache_dir(work_dir)
         if cache_dir is None:
             return None
@@ -387,6 +399,12 @@ class FunASRTranscriber(Transcriber):
             and meta.get("chunk_sec") == CHUNK_SEC
             # 批切段时长纳入指纹：改 batch_size_s 后旧结果作废。
             and meta.get("batch_size_s") == self.batch_size_s
+            # 强制聚类人数 K 纳入指纹：不同 --speakers 产出不同说话人标签，
+            # 不区分会静默复用旧 K 的标签（短音频整段路径尤甚）。
+            and meta.get("num_speakers") == num_speakers
+            # 时间戳单位解析口径纳入指纹：to_sec 整批统一单位后，旧缓存的时间戳
+            # 仍是旧口径，必须作废重转，否则改动静默不生效。
+            and meta.get("ts_unit_version") == TS_UNIT_VERSION
         ):
             return None
         result_path = cache_dir / "result.json"
@@ -397,7 +415,7 @@ class FunASRTranscriber(Transcriber):
         except (OSError, json.JSONDecodeError):
             return None
 
-    def _save_cache(self, work_dir, audio_path, model_name, result) -> None:
+    def _save_cache(self, work_dir, audio_path, model_name, result, num_speakers=None) -> None:
         cache_dir = self._cache_dir(work_dir)
         if cache_dir is None:
             return
@@ -410,6 +428,8 @@ class FunASRTranscriber(Transcriber):
             "spk_max_seg_ms": self.spk_max_seg_ms,
             "chunk_sec": CHUNK_SEC,
             "batch_size_s": self.batch_size_s,
+            "num_speakers": num_speakers,
+            "ts_unit_version": TS_UNIT_VERSION,
         }
         (cache_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
         (cache_dir / "result.json").write_text(
@@ -509,14 +529,21 @@ class FunASRTranscriber(Transcriber):
         gc.collect()
 
     # --- core ---
-    def transcribe(self, audio_path, duration_sec=None, *, work_dir=None, jobs=1, num_speakers=None) -> TranscriptResult:
+    def can_force_num_speakers(self, duration_sec: float | None) -> bool:
+        """Forced-K alignment only applies to the chunked long-audio path."""
+        return bool(duration_sec and duration_sec > CHUNK_SEC * CHUNK_MARGIN)
+
+    def transcribe(
+        self, audio_path, duration_sec=None, *, work_dir=None, jobs=1, num_speakers=None,
+        no_diarization: bool = False,
+    ) -> TranscriptResult:
         audio_path = Path(audio_path)
         duration_sec = duration_sec or _audio_duration_sec(audio_path)
         self._write_status(work_dir, "start", 0.0, "开始转录")
 
-        cached = self._load_cache(work_dir, audio_path, self.model_name)
+        cached = self._load_cache(work_dir, audio_path, self.model_name, num_speakers)
         if cached is not None:
-            logger.info("复用整段转写缓存（模型: %s）", self.model_name)
+            logger.info("复用整段转写缓存（模型: %s, K=%s）", self.model_name, num_speakers)
             self._write_status(work_dir, "done", 1.0, "命中转写缓存")
             return TranscriptResult(
                 raw_text=cached["raw_text"],
@@ -532,11 +559,13 @@ class FunASRTranscriber(Transcriber):
         # 长音频走分段路径（规避整段一次性 generate 的 CPU MemoryError）；
         # 短音频仍整段一次，省去切片与跨段对齐开销。
         if duration_sec and duration_sec > CHUNK_SEC * CHUNK_MARGIN:
-            segments = self._transcribe_chunked(audio_path, duration_sec, work_dir, jobs, num_speakers=num_speakers)
+            segments = self._transcribe_chunked(
+                audio_path, duration_sec, work_dir, jobs, num_speakers=num_speakers, no_diarization=no_diarization
+            )
         else:
             self._ensure_loaded()
             self._write_status(work_dir, "loaded", 0.05, "模型已加载")
-            segments = self._transcribe_whole(audio_path)
+            segments = self._transcribe_whole(audio_path, no_diarization=no_diarization)
 
         raw_text = "\n".join(seg["text"] for seg in segments if seg["text"])
         elapsed = time.time() - t0
@@ -551,7 +580,7 @@ class FunASRTranscriber(Transcriber):
             "segments": segments,
             "duration_sec": actual_duration,
         }
-        self._save_cache(work_dir, audio_path, self.model_name, result)
+        self._save_cache(work_dir, audio_path, self.model_name, result, num_speakers)
         self._write_status(work_dir, "done", 1.0, "转录完成")
         return TranscriptResult(
             raw_text=raw_text,
@@ -560,7 +589,7 @@ class FunASRTranscriber(Transcriber):
             cost_yuan=0.0,
         )
 
-    def _transcribe_whole(self, audio_path: Path) -> list[dict]:
+    def _transcribe_whole(self, audio_path: Path, no_diarization: bool = False) -> list[dict]:
         """整段一次性转写（短音频，原始逻辑）。返回 segments 列表。"""
         if self.model_name == "sensevoice-small":
             res = self._model.generate(
@@ -571,20 +600,25 @@ class FunASRTranscriber(Transcriber):
                 batch_size_s=self.batch_size_s,
                 merge_vad=True,
                 merge_length_s=15,
-                spk_model=True,
+                spk_model=not no_diarization,
                 output_timestamp=True,
             )
-            return self._build_segments(res, postprocess=_postprocess_sensevoice, add_punc=True)
+            # SenseVoice 组合内部已用 punc_model 补过标点，add_punc=False 避免二次补标点（双标点）。
+            return self._build_segments(res, postprocess=_postprocess_sensevoice, add_punc=False)
         # paraformer-large
         res = self._model.generate(input=str(audio_path), batch_size_s=self.batch_size_s)
         return self._build_segments(res, postprocess=_strip_sensevoice_tags, add_punc=False)
 
-    def _transcribe_chunked(self, audio_path: Path, duration_sec: float, work_dir, jobs: int = 1, num_speakers: int | None = None) -> list[dict]:
+    def _transcribe_chunked(
+            self, audio_path: Path, duration_sec: float, work_dir, jobs: int = 1, num_speakers: int | None = None,
+            no_diarization: bool = False,
+        ) -> list[dict]:
         """分段转写 + 跨段说话人全局对齐（长音频，修复整段一次性转写 OOM）。
 
         流程：
         1. 按 CHUNK_SEC 用 wave 按帧把 WAV 切成若干临时片段（不依赖 ffmpeg）；
-        2. 逐片 model.generate(spk_model=True) —— 单片内存峰值可控；jobs>1 时
+        2. 逐片 model.generate(spk_model=...)：``--no-diarization`` 时关闭说话人推理
+           （spk_model=False，跳过说话人计算），否则开启；单片内存峰值可控；jobs>1 时
            用进程池并行（各 worker 自带模型），否则串行；
         3. 每片的 SPEAKER_xx 是片内局部编号，跨片会错位：收集每片每说话人的
            「最长 utterance」音频片段，用 cam++ SV 两两打分、贪心聚类，把局部
@@ -601,19 +635,19 @@ class FunASRTranscriber(Transcriber):
 
         if jobs > 1:
             self._transcribe_chunks_parallel(
-                chunk_paths, audio_path, work_dir, all_segments, rep_clips, jobs
+                chunk_paths, audio_path, work_dir, all_segments, rep_clips, jobs, no_diarization
             )
         else:
             self._ensure_loaded()
             self._write_status(work_dir, "loaded", 0.05, "模型已加载")
             for i, (cpath, offset) in enumerate(chunk_paths, 1):
-                cached_chunk = self._load_chunk_cache(work_dir, audio_path, i - 1, cpath)
+                cached_chunk = self._load_chunk_cache(work_dir, audio_path, i - 1, cpath, no_diarization=no_diarization)
                 if cached_chunk is not None:
                     segs = cached_chunk
                     logger.info("复用第 %d/%d 段转写缓存", i, total)
                 else:
-                    segs = self._transcribe_chunk_with_retry(cpath, i - 1)
-                    self._save_chunk_cache(work_dir, audio_path, i - 1, cpath, segs)
+                    segs = self._transcribe_chunk_with_retry(cpath, i - 1, no_diarization=no_diarization)
+                    self._save_chunk_cache(work_dir, audio_path, i - 1, cpath, segs, no_diarization=no_diarization)
                 self._absorb_chunk(segs, cpath, i - 1, offset, work_dir, all_segments, rep_clips)
                 self._write_status(
                     work_dir, "transcribe", 0.1 + 0.8 * i / total, f"转写 {i}/{total} 段"
@@ -637,7 +671,7 @@ class FunASRTranscriber(Transcriber):
         return merged
 
     def _transcribe_chunks_parallel(
-        self, chunk_paths, audio_path, work_dir, all_segments, rep_clips, jobs
+        self, chunk_paths, audio_path, work_dir, all_segments, rep_clips, jobs, no_diarization: bool = False
     ) -> None:
         """并行转写所有未命中缓存的分块（进程池），完成即并入全局结果。"""
         total = len(chunk_paths)
@@ -645,7 +679,7 @@ class FunASRTranscriber(Transcriber):
         pending: dict = {}
         # 先消化命中缓存的分块（不占 worker）
         for i, (cpath, offset) in enumerate(chunk_paths, 1):
-            cached_chunk = self._load_chunk_cache(work_dir, audio_path, i - 1, cpath)
+            cached_chunk = self._load_chunk_cache(work_dir, audio_path, i - 1, cpath, no_diarization=no_diarization)
             if cached_chunk is not None:
                 segs = cached_chunk
                 logger.info("复用第 %d/%d 段转写缓存", i, total)
@@ -654,20 +688,22 @@ class FunASRTranscriber(Transcriber):
                     work_dir, "transcribe", 0.1 + 0.8 * i / total, f"转写 {i}/{total} 段"
                 )
             else:
-                fut = pool.submit(_chunk_worker_transcribe, str(cpath), i - 1)
+                fut = pool.submit(_chunk_worker_transcribe, str(cpath), i - 1, no_diarization)
                 pending[fut] = (i - 1, cpath, offset)
         done = len(chunk_paths) - len(pending)
         for fut in as_completed(pending):
             ci, cpath, offset = pending[fut]
             segs = fut.result()  # worker 内已做指数退避重试
-            self._save_chunk_cache(work_dir, audio_path, ci, cpath, segs)
+            self._save_chunk_cache(work_dir, audio_path, ci, cpath, segs, no_diarization=no_diarization)
             self._absorb_chunk(segs, cpath, ci, offset, work_dir, all_segments, rep_clips)
             done += 1
             self._write_status(
                 work_dir, "transcribe", 0.1 + 0.8 * done / total, f"转写 {done}/{total} 段"
             )
 
-    def _transcribe_chunk_with_retry(self, chunk_path: Path, chunk_idx: int) -> list[dict]:
+    def _transcribe_chunk_with_retry(
+        self, chunk_path: Path, chunk_idx: int, no_diarization: bool = False
+    ) -> list[dict]:
         """转写单个分块；对偶发异常指数退避重试，OOM 类不重试。
 
         一个 10 分钟分块的 model.generate 偶发失败（临时资源争抢、Defender
@@ -676,7 +712,7 @@ class FunASRTranscriber(Transcriber):
         """
         for attempt in range(1, CHUNK_RETRIES + 1):
             try:
-                return self._transcribe_whole(chunk_path)
+                return self._transcribe_whole(chunk_path, no_diarization=no_diarization)
             except MemoryError:
                 raise
             except Exception as exc:
@@ -692,7 +728,9 @@ class FunASRTranscriber(Transcriber):
     def _chunk_cache_path(self, work_dir, chunk_idx: int) -> Path:
         return Path(work_dir) / "transcribe" / f"chunk_{chunk_idx:04d}.json"
 
-    def _load_chunk_cache(self, work_dir, audio_path: Path, chunk_idx: int, chunk_path: Path):
+    def _load_chunk_cache(
+        self, work_dir, audio_path: Path, chunk_idx: int, chunk_path: Path, no_diarization: bool = False
+    ):
         p = self._chunk_cache_path(work_dir, chunk_idx)
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -707,6 +745,8 @@ class FunASRTranscriber(Transcriber):
                 and data.get("model_name") == self.model_name
                 and data.get("spk_max_seg_ms") == self.spk_max_seg_ms
                 and data.get("batch_size_s") == self.batch_size_s
+                and data.get("ts_unit_version") == TS_UNIT_VERSION
+                and data.get("spk_disabled", False) == no_diarization
                 and isinstance(data.get("segments"), list)
             ):
                 return data["segments"]
@@ -714,7 +754,9 @@ class FunASRTranscriber(Transcriber):
             return None
         return None
 
-    def _save_chunk_cache(self, work_dir, audio_path: Path, chunk_idx: int, chunk_path: Path, segments):
+    def _save_chunk_cache(
+        self, work_dir, audio_path: Path, chunk_idx: int, chunk_path: Path, segments, no_diarization: bool = False
+    ):
         p = self._chunk_cache_path(work_dir, chunk_idx)
         p.parent.mkdir(parents=True, exist_ok=True)
         src = audio_path.stat()
@@ -725,6 +767,8 @@ class FunASRTranscriber(Transcriber):
             "model_name": self.model_name,
             "spk_max_seg_ms": self.spk_max_seg_ms,
             "batch_size_s": self.batch_size_s,
+            "ts_unit_version": TS_UNIT_VERSION,
+            "spk_disabled": no_diarization,
             "segments": segments,
         }
         p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -769,7 +813,7 @@ class FunASRTranscriber(Transcriber):
                 continue
             local = int(spk.split("_")[1])
             dur = s["end_time"] - s["start_time"]
-            if local not in best or dur > best[local]["_dur"]:
+            if local not in best or self._rep_better(dur, best[local]["_dur"]):
                 best[local] = {**s, "_dur": dur}
         if not best:
             return []
@@ -800,6 +844,79 @@ class FunASRTranscriber(Transcriber):
                 reps.append({"audio": str(p), "key": (chunk_idx, local)})
         return reps
 
+    @staticmethod
+    def _rep_better(new_dur: float, cur_dur: float) -> bool:
+        """代表片段优选规则：是否用 new 替换 cur。
+
+        时长落在 [REP_CLIP_MIN_SEC, REP_CLIP_MAX_SEC] 内最长者优先；两者都不在
+        区间时，过短的取更长、过长的取更短（超长段多为时间戳异常或长独白，cam++
+        对它提取的 embedding 没有区分度）。旧逻辑无条件取最长，正是求职别慌一期
+        选出 120/450/510 秒怪物片段的原因。
+        """
+        n_in = REP_CLIP_MIN_SEC <= new_dur <= REP_CLIP_MAX_SEC
+        c_in = REP_CLIP_MIN_SEC <= cur_dur <= REP_CLIP_MAX_SEC
+        if n_in and c_in:
+            return new_dur > cur_dur
+        if n_in != c_in:
+            return n_in
+        if new_dur < REP_CLIP_MIN_SEC:
+            return new_dur > cur_dur
+        return new_dur < cur_dur
+
+    def _extract_embeddings(self, reps: list[dict]) -> list:
+        """用 cam++ 逐个提取代表片段的 speaker embedding（每片段一次，非两两调用）。
+
+        funasr 1.4.2 的 ``AutoModel`` 已无 ``inference_sv``（实测只剩 generate /
+        inference），旧代码调用它必然抛 ``AttributeError``；异常又被 except 静默
+        降为 0 分，结果是相似度矩阵除对角线外全零、kmedoids 把标签全塌到簇 0
+        （求职别慌一期后 66% 内容被判为同一人）。改为提取 embedding 后算余弦，
+        调用次数也从 O(n²) 降到 O(n)。
+
+        提取失败的片段返回 None，由 _align_speakers 统计并显式报错，不再静默。
+        """
+        sv = self._ensure_sv_loaded()
+        embs: list = []
+        for rep in reps:
+            try:
+                arr = self._spk_embedding(sv.generate(input=rep["audio"]))
+            except Exception as exc:  # noqa: BLE001 - 单片段失败不应中断，但必须留痕
+                logger.error("cam++ 提取 embedding 失败（%s）: %s", rep["audio"], exc)
+                arr = None
+            embs.append(arr if arr is not None and arr.size else None)
+        return embs
+
+    @staticmethod
+    def _spk_embedding(res):
+        """从 cam++ generate 的返回里取出 speaker embedding（一维 float 数组）。"""
+        import numpy as np
+
+        if not res:
+            return None
+        if isinstance(res, list):
+            res = res[0] if res else None
+        if not isinstance(res, dict):
+            return None
+        emb = res.get("spk_embedding")
+        if emb is None:
+            return None
+        if hasattr(emb, "detach"):
+            emb = emb.detach().cpu().numpy()
+        arr = np.asarray(emb, dtype="float64")
+        # 单片段输入形状为 [1, 192]；逐层降维取首条
+        while arr.ndim > 1:
+            arr = arr[0]
+        return arr
+
+    @staticmethod
+    def _cosine(a, b) -> float:
+        import numpy as np
+
+        na = float(np.linalg.norm(a))
+        nb = float(np.linalg.norm(b))
+        if na == 0.0 or nb == 0.0:
+            return -1.0
+        return float(np.dot(a, b) / (na * nb))
+
     def _align_speakers(self, reps: list[dict], num_speakers: int | None = None) -> dict[tuple[int, int], int]:
         """用 cam++ SV 对代表片段两两打分，聚类为全局说话人。
 
@@ -813,22 +930,36 @@ class FunASRTranscriber(Transcriber):
         """
         if not reps:
             return {}
-        sv = self._ensure_sv_loaded()
+        embs = self._extract_embeddings(reps)
         n = len(reps)
-        # 两两相似度矩阵（相似度越高越可能是同一人）
+        # 两两余弦相似度（相似度越高越可能是同一人）
         sim = [[0.0] * n for _ in range(n)]
         for i in range(n):
             sim[i][i] = 1.0
+            if embs[i] is None:
+                continue
             for j in range(i + 1, n):
-                try:
-                    res = sv.inference_sv(reps[i]["audio"], reps[j]["audio"])
-                    s = self._sv_score(res)
-                except Exception as exc:
-                    logger.debug("inference_sv failed: %s", exc)
-                    s = -1.0
+                if embs[j] is None:
+                    continue
+                s = self._cosine(embs[i], embs[j])
                 if s < 0:
                     s = 0.0
                 sim[i][j] = sim[j][i] = s
+
+        # 提取失败会让相似度矩阵退化（全线失败时除对角线外全零，聚类必然塌缩），
+        # 继续跑只会产出标签错误的稿子——显式失败，不静默（历史上被 debug 级日志
+        # 掩盖了 300/300 次失败，直到成稿出现 2 万字的单一大段落才被发现）。
+        missing = [reps[i]["audio"] for i in range(n) if embs[i] is None]
+        if missing:
+            raise RuntimeError(
+                f"cam++ 无法提取 {len(missing)}/{n} 个代表片段的声纹，跨段说话人对齐不可用"
+                f"（例如：{', '.join(missing[:3])}）。请检查 funasr 与 cam++ 模型缓存。"
+            )
+
+        # 矩阵退化兜底：embedding 全部提取成功、但余弦仍大面积精确为 0（如零向量
+        # 输出）时，kmedoids 的 max 并列取第一会把标签塌到簇 0。历史故障正是
+        # 全零矩阵 + 并列取第一导致的，这里显式拦截，不产出标签错误的成稿。
+        self._assert_no_chunk_collapse(sim)
 
         if num_speakers is None:
             return self._greedy_cluster(reps, sim)
@@ -872,14 +1003,29 @@ class FunASRTranscriber(Transcriber):
     def _kmedoids(sim: list[list[float]], k: int, max_iter: int = 25) -> list[int]:
         """在相似度矩阵上做 K-medoids（相似度越高越「近」）。返回每点的簇号。"""
         n = len(sim)
-        # 初始化：max-min 选 k 个彼此最不相似的 medoids（相似度最小）
-        medoids = [0]
-        while len(medoids) < k:
-            cand = min(
-                (i for i in range(n) if i not in medoids),
-                key=lambda x: max(sim[x][m] for m in medoids),
-                default=None,
+        # 初始化：选 k 个彼此最不相似的 medoids。旧的 max-min 会把「孤立噪声点」
+        # （与所有人都低相似度的片段，如某 chunk 多出的一个短暂说话人）选为 medoid，
+        # 让它独占一簇、把真实说话人挤进剩余簇（求职别慌一期 K=3 聚出 16/8/1 而非
+        # 8/8/8）。修复：先按「对全体的平均相似度」识别孤立点并排除，首个 medoid
+        # 取最「中心」的点，后续 medoid 在非孤立点里选与已选最不相似者。
+        avg = [sum(sim[i][j] for j in range(n) if j != i) / (n - 1) for i in range(n)]
+        # 平均相似度低于最高值一半 → 判为孤立噪声点（真实说话人的代表片段通常
+        # 与同人其他 chunk 片段高度相似，均值远高于纯噪声点）。
+        cutoff = max(avg) * 0.5
+
+        def _pick(medoids: list[int], allow_outlier: bool) -> int | None:
+            pool = (
+                i for i in range(n)
+                if i not in medoids and (allow_outlier or avg[i] >= cutoff)
             )
+            return min(pool, key=lambda x: max(sim[x][m] for m in medoids), default=None)
+
+        medoids = [max(range(n), key=lambda i: avg[i])]
+        while len(medoids) < k:
+            cand = _pick(medoids, allow_outlier=False)
+            if cand is None:
+                # 非孤立点不够 k 个，放宽到全部点（退回旧行为，保证仍能凑够 K 类）
+                cand = _pick(medoids, allow_outlier=True)
             if cand is None:
                 break
             medoids.append(cand)
@@ -898,18 +1044,28 @@ class FunASRTranscriber(Transcriber):
         return [max(range(k), key=lambda c: sim[i][medoids[c]]) for i in range(n)]
 
     @staticmethod
-    def _sv_score(res) -> float:
-        """从 FunASR inference_sv 的返回里稳健地取出相似度分数。"""
-        if not res:
-            return -1.0
-        if isinstance(res, list):
-            res = res[0] if res else {}
-        scores = res.get("scores") or res.get("score")
-        if scores is None:
-            return -1.0
-        if isinstance(scores, (list, tuple)):
-            return float(scores[0]) if scores else -1.0
-        return float(scores)
+    def _assert_no_chunk_collapse(sim: list[list[float]]) -> None:
+        """相似度矩阵退化自检：非对角大面积精确为 0 时，聚类必然塌缩。
+
+        求职别慌一期根因是旧代码调用不存在的 ``inference_sv``，异常被静默降为
+        0 分，矩阵除对角线外全零，kmedoids 的 ``max`` 并列取第一把标签全塌到
+        簇 0。现虽改为 generate + embedding，但零向量 embedding 等退化仍会造出
+        同样的全零矩阵——故在此显式拦截，宁可报错也不产出标签错误的成稿。
+
+        正常 cam++ 余弦几乎不会精确为 0（不同人通常 0.1~0.4），故以「非对角
+        精确零值占比 > 50%」为退化信号。
+        """
+        n = len(sim)
+        if n < 3:
+            return
+        offdiag = [sim[i][j] for i in range(n) for j in range(i + 1, n)]
+        zeros = sum(1 for v in offdiag if v <= 1e-9)
+        if zeros / len(offdiag) > 0.5:
+            raise RuntimeError(
+                f"说话人相似度矩阵退化：非对角 {zeros}/{len(offdiag)} 个值为 0，"
+                f"跨段对齐将塌缩（历史故障：inference_sv 缺失被静默吞掉）。"
+                f"请检查 cam++ 模型输出是否正常。"
+            )
 
     def _cleanup_chunks(self, work_dir) -> None:
         import shutil
@@ -935,11 +1091,25 @@ class FunASRTranscriber(Transcriber):
         has_word_ts = len(words) == len(timestamps) and len(words) > 0
 
         # FunASR 时间戳单位：实际为毫秒（实测 sentence_info start=400~30410，
-        # words timestamp [3250,3310]），测试夹具用秒。统一换算为秒：>=1000 视为
-        # 毫秒（1000ms=1s 是真实边界；1000 秒的单个音频段不存在，故用 >= 不漏 1000ms）。
+        # words timestamp [3250,3310]），测试夹具用秒。
+        #
+        # 单位判据必须**整批统一**：旧逻辑按单值 `v >= 1000` 判断，而 FunASR 每个
+        # chunk 的首条 sentence_info 会返回毫秒小值（<1000），与其余毫秒大值混在
+        # 同一批里，于是首条被当成秒、其余当成毫秒——求职别慌一期 chunk5 首段被算
+        # 成 90.0s→870.0s（真实 0.09s→0.87s），进而切出 510 秒的怪物代表片段。
+        # 取全批最大值定单位：存在大值即整批按毫秒处理，测试夹具（全为秒制小值）
+        # 仍按秒，两者不冲突。
+        raw_vals = [
+            float(s[k])
+            for s in sentences
+            for k in ("start", "end")
+            if s.get(k) is not None
+        ]
+        unit_ms = bool(raw_vals) and max(raw_vals) >= 1000
+
         def to_sec(v) -> float:
             v = float(v)
-            return v / 1000.0 if v >= 1000 else v
+            return v / 1000.0 if unit_ms else v
 
         cleaned = []
         for s in sentences:

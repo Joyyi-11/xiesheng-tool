@@ -2,8 +2,10 @@
 
 from src.result_cache import (
     episode_key,
+    find_cached_handoff,
     find_cached_markdown,
     load_cache,
+    record_handoff,
     record_result,
 )
 
@@ -16,6 +18,8 @@ class TestEpisodeKey:
 
     def test_url_alone_is_stable(self):
         assert episode_key("https://a/1") == episode_key("https://a/1", "")
+        assert episode_key("https://a/1") == episode_key("https://a/1", stage="final")
+        assert episode_key("https://a/1") != episode_key("https://a/1", stage="session_handoff")
 
 
 class TestResultCache:
@@ -50,7 +54,27 @@ class TestResultCache:
         record_result(tmp_path, "https://a/1", "2026-01-01", md)
         cache = load_cache(tmp_path)
         assert len(cache) == 1
-        assert cache[episode_key("https://a/1", "2026-01-01")]["markdown_path"] == str(md)
+        entry = cache[episode_key("https://a/1", "2026-01-01")]
+        assert entry["path"] == "out.md"
+        assert entry["stage"] == "final"
+
+    def test_handoff_is_a_separate_stage_from_final(self, tmp_path):
+        package = tmp_path / "out_diarized.txt"
+        package.write_text("会话包", encoding="utf-8")
+        record_handoff(tmp_path, "https://a/1", "2026-01-01", package)
+
+        assert find_cached_handoff(tmp_path, "https://a/1", "2026-01-01") == package
+        assert find_cached_markdown(tmp_path, "https://a/1", "2026-01-01") is None
+
+    def test_final_cache_rejects_handoff_text_file(self, tmp_path):
+        package = tmp_path / "out_diarized.txt"
+        package.write_text("会话包", encoding="utf-8")
+        try:
+            record_result(tmp_path, "https://a/1", "2026-01-01", package)
+        except ValueError as exc:
+            assert ".md" in str(exc)
+        else:
+            raise AssertionError("expected ValueError for non-Markdown final result")
 
     def test_corrupt_cache_is_ignored(self, tmp_path):
         cache_path = tmp_path / ".work" / "result_cache.json"

@@ -16,6 +16,7 @@ from src.processor.llm_processor import (
     _parse_start_sec,
     _probe_model,
     _request_json,
+    _request_text,
     _resolve_effective_model,
     _save_cached_chunk,
     _validate_cleaned_chunk,
@@ -46,7 +47,8 @@ class TestBuildOutputDoc:
         assert doc.key_points[0].quote == "这是第一句原话。"
         assert doc.key_points[1].quote == "这是第二句原话。"
         assert "Nina" in doc.speaker_intro
-        assert "【主持人Nina】你好。" in doc.full_text
+        # 显示标签只留短名、剥掉角色前缀（speaker_resolver.to_display_label 为唯一真相源）
+        assert "【Nina】你好。" in doc.full_text
 
     def test_empty_data_yields_empty_doc(self):
         doc = _build_output_doc({}, "标题", "播客", "2026-01-01", "", "正文")
@@ -125,7 +127,8 @@ class TestChunkProcessing:
             "",
             "[SPEAKER_00] 你好。\n[SPEAKER_01] 你好。",
         )
-        assert "【主播连漪】你好。" in doc.full_text
+        # 同上：显示标签剥角色前缀，主播连漪 → 【连漪】
+        assert "【连漪】你好。" in doc.full_text
         assert "[SPEAKER_01]" in doc.full_text
 
 
@@ -275,7 +278,24 @@ class TestRequestJson:
         client = FakeClient([RuntimeError("429 Token rate limit"), _json_response({"ok": 1})])
         data, _, _ = _request_json(client, "m", "sys", "u", max_tokens=10)
         assert data == {"ok": 1}
-        assert len(sleeps) >= 1
+
+
+class TestRequestText:
+    def test_incomplete_finish_reason_is_retried(self):
+        client = FakeClient([_response("正文", finish_reason="length"), _response("正文。")])
+        text, _, _ = _request_text(client, "m", "s", "u", max_tokens=100)
+        assert text == "正文。"
+
+    def test_empty_response_is_retried(self, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr("src.processor.llm_processor.time.sleep", sleeps.append)
+        client = FakeClient([_response(""), _response("正文。")])
+        text, _, _ = _request_text(client, "m", "s", "u", max_tokens=100)
+        assert text == "正文。"
+        assert len(sleeps) == 0
+
+
+class TestRequestJsonRetries:
 
     def test_persistent_failure_raises_last_error(self, monkeypatch):
         sleeps = []

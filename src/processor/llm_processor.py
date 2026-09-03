@@ -5,7 +5,6 @@ import json
 import logging
 import re
 import time
-import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
@@ -15,8 +14,9 @@ import openai
 from openai import OpenAI
 
 from src.config import LLMConfig
+from src.diarization.speaker_resolver import to_display_label
 from src.models.llm_struct import parse_struct
-from src.models.schemas import KeyPoint, Keyword, OutputDoc, QuestionItem
+from src.models.schemas import KeyPoint, Keyword, OutputDoc, QuestionItem, TermDef
 from src.processor.prompt import (
     CLEAN_SYSTEM_PROMPT,
     CLEAN_USER_PROMPT,
@@ -32,11 +32,18 @@ CHUNK_CONCURRENCY = 4  # 分块校订并行度；并发过多易触发限流
 MIN_CLEAN_RATIO = 0.55
 MAX_CLEAN_RATIO = 1.35
 # 修改 CLEAN 提示词或分块/对齐逻辑时递增，使旧校订分块缓存作废。
-PROMPT_VERSION = 2
-# 结构化（summary+keywords+outline 合并）提示词版本；改动提示词或解析时递增。
+PROMPT_VERSION = 4
+# 结构化（summary+keywords+outline 合并）提示词版本：改动提示词或解析时递增。
+# v9：questions.question 明确为纯文本（禁止自带 ** 加粗），渲染侧 markdown.py 统一
+#     输出 `1. **问题？**`（序号在加粗外），与 session 路径 v18 规则对齐。
+# v8：核心观点改为「观点句（句号结尾）+ 展开论述句 + 引用句」顺次相接，禁止 point 以
+#     冒号收尾引出 evidence；渲染侧由 markdown.py 确定性去冒号并补句末标点（v17 结构）。
+# v7：CLEAN 提示词 rule 2 扩展「断句」覆盖句间过度切分（相邻两句本应逗号连读却被句号拆开），与 session 路径校订规则第 1 条 (b) 对齐。
+# v6：问题与思考要求强化——answer 须直接解答问题（结尾不得反抛新问号），引用人物须首次点明「姓名（身份）」、禁止裸代词；问题须提炼全文核心议题。
+# v5：核心观点原话改行内直角引号（不再单独引用块）；新增 key_points.terms 就近解释观点内特有术语；
+# keywords 改为只放残留术语（0-4 个）、排除播客名/节目名/嘉宾名/平台名等专名。
 # v4：speaker_mapping 增加「多人混段不映射、保留 [SPEAKER_XX]」约束（Vol.11 错乱修复）。
-STRUCT_PROMPT_VERSION = 4
-MAX_KEYWORDS = 10
+STRUCT_PROMPT_VERSION = 9
 
 _TIME_RE = re.compile(r"^(?:(\d+):)?(\d+):(\d+)$")
 
@@ -226,6 +233,9 @@ def process(
     input_tokens += inp
     output_tokens += out
     doc = _build_output_doc(struct, title, podcast_name, pub_date, show_notes, cleaned_transcript)
+    if failed:
+        chunk_ids = ", ".join(str(index + 1) for index, _ in sorted(failed))
+        doc.warnings.append(f"分块 {chunk_ids} 校订失败，已回退原稿，需人工复核")
     return doc, input_tokens, output_tokens
 
 
@@ -366,6 +376,54 @@ def _request_json(
                 logger.warning("provider 不支持 json_object，降级为提示词约束 JSON: %s", exc)
                 continue
             # 限流/连接类错误值得退避重试（如 429、APIConnectionError）
+            if _is_rate_limit_error(exc):
+                delay = min(_LLM_RETRY_MAX_SEC, _LLM_RETRY_BASE_SEC * (2**attempt))
+                logger.warning("LLM rate-limited/overloaded; retrying in %.1fs: %s", delay, exc)
+                time.sleep(delay)
+                continue
+            if attempt < MAX_LLM_ATTEMPTS - 1:
+                logger.warning("LLM request failed; retrying: %s", exc)
+    assert last_error is not None
+    raise last_error
+
+
+def _request_text(
+    client: OpenAI,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    max_tokens: int,
+) -> tuple[str, int, int]:
+    """Request plain text with the same completion/retry contract as JSON mode."""
+    last_error: Exception | None = None
+    for attempt in range(MAX_LLM_ATTEMPTS):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=max_tokens,
+            )
+            choice = response.choices[0]
+            if choice.finish_reason != "stop":
+                raise RuntimeError(f"LLM response was incomplete: finish_reason={choice.finish_reason}")
+            content = choice.message.content or ""
+            if not content.strip():
+                raise RuntimeError("LLM returned empty text")
+            usage = response.usage
+            return (
+                content,
+                usage.prompt_tokens if usage else 0,
+                usage.completion_tokens if usage else 0,
+            )
+        except Exception as exc:
+            last_error = exc
+            if _is_model_not_found(exc):
+                raise ModelNotFoundError(str(exc)) from exc
             if _is_rate_limit_error(exc):
                 delay = min(_LLM_RETRY_MAX_SEC, _LLM_RETRY_BASE_SEC * (2**attempt))
                 logger.warning("LLM rate-limited/overloaded; retrying in %.1fs: %s", delay, exc)
@@ -629,7 +687,12 @@ def _build_output_doc(
     struct = parse_struct(data)
 
     key_points = [
-        KeyPoint(point=kp.point, evidence=kp.evidence, quote=kp.quote)
+        KeyPoint(
+            point=kp.point,
+            evidence=kp.evidence,
+            quote=kp.quote,
+            terms=[TermDef(term=t.term, desc=t.desc) for t in kp.terms if t.valid],
+        )
         for kp in struct.key_points
         if kp.valid
     ]
@@ -637,9 +700,11 @@ def _build_output_doc(
     speaker_mapping = struct.speaker_mapping or {}
     for speaker, name in speaker_mapping.items():
         if re.fullmatch(r"SPEAKER_\d+", str(speaker)) and isinstance(name, str) and name.strip():
+            # 显示标签由脚本统一落地（剥角色+外文取 given name+【】），
+            # 不再直接用 LLM 给的 speaker_mapping 原始字符串，保证两链路格式等价。
             full_text = re.sub(
                 rf"\[{re.escape(str(speaker))}\]\s*",
-                f"【{name.strip()}】",
+                to_display_label(name.strip()),
                 full_text,
             )
     questions = [
@@ -659,4 +724,3 @@ def _build_output_doc(
         summary=struct.summary,
         questions=questions,
     )
-

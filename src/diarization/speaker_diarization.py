@@ -3,9 +3,22 @@
 import logging
 from pathlib import Path
 
-from diarize import diarize
-
 logger = logging.getLogger(__name__)
+
+
+def _get_diarize():
+    """Lazy import of the heavy `diarize` dependency (pyannote/torch stack).
+
+    Kept optional so the default SenseVoice path does not require it.
+    """
+    try:
+        from diarize import diarize
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise RuntimeError(
+            "diarize 未安装。仅 --model paraformer-large 路径需要它；"
+            "请安装可选依赖：pip install 'xiesheng[diarize]'"
+        ) from exc
+    return diarize
 
 SPEAKER_GAP = 0.2  # seconds — 同说话人碎片合并的间隔上限（0.5s→0.2s 收紧，
 # 避免把短停顿的相邻段拼成更长的段；跨说话人绝不合并，见 assign_speakers）
@@ -17,7 +30,8 @@ def run_diarization(audio_path: Path, num_speakers: int | None = None) -> list[d
     Returns list of dicts with start, end, speaker keys.
     """
     logger.info("Running speaker diarization on %s...", audio_path.name)
-    result = diarize(str(audio_path), num_speakers=num_speakers)
+    diarize_fn = _get_diarize()
+    result = diarize_fn(str(audio_path), num_speakers=num_speakers)
     segments = [
         {"start": seg.start, "end": seg.end, "speaker": seg.speaker}
         for seg in result.segments

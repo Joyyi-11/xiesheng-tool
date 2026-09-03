@@ -1,6 +1,6 @@
 """保真重建会话内校订的全文转录（防「过度删减」返工）。
 
-会话内校订（--no-llm 链路）最常见的问题：AI 校订时把口语长叙述压缩成概要，
+会话内校订（会话链路 / --llm-mode session）最常见的问题：AI 校订时把口语长叙述压缩成概要，
 导致 ``validate_session_output`` 报「全文转录长度仅为原始转录的 <50%（疑似
 过度删减）」。本工具从 ``<节目>_diarized.txt`` 会话包**保真重建**全文转录：
 
@@ -34,9 +34,9 @@ import re
 import sys
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from src.utils import SPEAKER_LINE_RE
 
-SPEAKER_RE = re.compile(r"^\[(SPEAKER_\d+)\]\s*(.*)$")
+logger = logging.getLogger(__name__)
 
 
 def parse_package(package_text: str) -> tuple[str, str, str, str, list[tuple[str, str]]]:
@@ -60,7 +60,7 @@ def parse_package(package_text: str) -> tuple[str, str, str, str, list[tuple[str
             in_notes = False
             continue
         if in_transcript:
-            m = SPEAKER_RE.match(stripped)
+            m = SPEAKER_LINE_RE.match(stripped)
             if m:
                 segs.append((m.group(1), m.group(2).strip()))
             transcript.append(line)
@@ -87,22 +87,27 @@ def build_transcript(segs: list[tuple[str, str]], speaker_map: dict[str, str]) -
     by content; with a mapping they become ``【名字】`` markers (v9 方括号格式，
     无冒号、无加粗，与 ``session_edit.SESSION_RULES`` 一致）。
     """
-    merged: list[tuple[str, str]] = []
+    # 合并键取「映射后的姓名」而非原始标签：diarization 常把同一人切成多个簇
+    # （如 SPEAKER_01 与 SPEAKER_03 都映射到「湫湫」），只按原标签合并会留下
+    # 同人相邻多段——正是「明明一个人讲却贴了好多标签」的根因。
+    merged: list[tuple[str, str, bool]] = []  # (key, text, is_name)
     for label, text in segs:
         if not text:
             continue
-        if merged and merged[-1][0] == label:
-            merged[-1] = (label, merged[-1][1] + text)
+        name = speaker_map.get(label, "")
+        key = name or label
+        if merged and merged[-1][0] == key:
+            prev_key, prev_text, is_name = merged[-1]
+            merged[-1] = (prev_key, prev_text + text, is_name)
         else:
-            merged.append((label, text))
+            merged.append((key, text, bool(name)))
 
     out: list[str] = []
-    for label, text in merged:
-        name = speaker_map.get(label, "")
-        if name:
-            out.append(f"【{name}】{text}")
+    for key, text, is_name in merged:
+        if is_name:
+            out.append(f"【{key}】{text}")
         else:
-            out.append(f"[{label}] {text}")
+            out.append(f"[{key}] {text}")
     return "\n\n".join(out)
 
 
@@ -112,13 +117,13 @@ def build_markdown(
     show_notes: str,
     transcript_body: str,
 ) -> str:
-    """Assemble a minimal v5-shaped draft .md (title/source/Show Notes/全文转录)."""
+    """Assemble a minimal draft .md (title/source/Show Notes/全文转录)."""
     lines = [
         f"# {title}",
         "",
         source_line or "> 来源：",
         "",
-        "# Show Notes",
+        "## Show Notes",
         "",
         show_notes or "（无）",
         "",

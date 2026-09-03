@@ -87,5 +87,5 @@ class TestStructToDoc:
                 }
             )
         )
-        assert doc["key_points"] == [{"point": "a", "evidence": "e", "quote": ""}]
+        assert doc["key_points"] == [{"point": "a", "evidence": "e", "quote": "", "terms": []}]
         assert doc["keywords"] == []

@@ -51,10 +51,17 @@ def download_audio(url: str, output_dir: Path | None = None, stem: str | None = 
     ext = _guess_extension(url)
     dest = output_dir / f"{stem}{ext}"
 
-    # 跳过已存在的完整音频：原子下载保证 dest 若非空即为完整成功产物。
+    # 跳过已存在的完整音频。原子下载保证正常产物可复用，但磁盘损坏或外部
+    # 半成品可能伪装成非空文件，因此先用 ffprobe 做轻量完整性检查。
     if dest.exists() and dest.stat().st_size > 0:
-        logger.info("音频已存在，跳过下载：%s", dest)
-        return dest
+        try:
+            duration = get_duration_seconds(dest)
+            if duration > 0:
+                logger.info("音频已存在（%.1fs），跳过下载：%s", duration, dest)
+                return dest
+            logger.warning("已有音频时长为 %.1fs，视为不完整，重新下载：%s", duration, dest)
+        except Exception as exc:
+            logger.warning("已有音频无法读取时长，视为不完整并重新下载：%s（%s）", dest, exc)
 
     part = output_dir / f"{stem}{ext}.part"
     last_exc: Exception | None = None

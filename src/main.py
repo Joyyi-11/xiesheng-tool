@@ -7,8 +7,8 @@ Usage:
 """
 
 import argparse
+import json
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -20,12 +20,13 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
         pass
 
 from src.audio import convert_to_wav, download_audio, get_duration_seconds
-from src.config import DEFAULT_LLM_PROVIDER, LLM_MODELS, get_llm_config
+from src.config import DEFAULT_LLM_PROVIDER, LLM_MODELS, get_llm_config, llm_configured
 from src.models.schemas import EpisodeInfo
 from src.processor import llm_processor
 from src.processor.normalize import normalize_quotes
+from src.processor.output_quality import assert_valid_output_doc
 from src.renderer.markdown import build_output_markdown
-from src.result_cache import find_cached_markdown, record_result
+from src.result_cache import find_cached_handoff, find_cached_markdown, record_handoff, record_result
 from src.scraper.xiaoyuzhou import scrape_episode
 from src.utils import CostTracker, Timer, fmt_time, safe_filename
 
@@ -40,7 +41,7 @@ logger = logging.getLogger("xiesheng")
 def build_session_doc(episode: EpisodeInfo, transcript_text: str) -> str:
     """Build a self-contained, speaker-labeled transcript for in-session post-processing.
 
-    The --no-llm path produces this instead of the API path. It embeds episode
+    The session-link (--llm-mode session) produces this instead of the API path. It embeds episode
     metadata and Show Notes so the whole file can be pasted directly into an AI
     chat session for cleaning and structuring (speaker->name mapping, key points...).
     """
@@ -58,6 +59,56 @@ def build_session_doc(episode: EpisodeInfo, transcript_text: str) -> str:
         transcript_text,
     ]
     return "\n".join(lines)
+
+
+def emit_session_handoff(
+    output_dir, url, episode, raw_path, labeled_path, safe_name,
+    spk_to_label=None, transcript_text="",
+) -> None:
+    """会话内校对链路交付：产出 OutputDoc JSON 骨架，交会话内 agent 填内容后跑渲染 CLI。
+
+    会话链路与 API 链路唯一区别是「LLM 在哪跑」——前者由会话内的 agent 执行校对，
+    后者由流水线调 LLM API。两者成品结构应等价，且显示标签由脚本（to_display_label）
+    统一落地，不依赖 LLM 是否「遵守约定」。
+
+    本函数只产出骨架 JSON（转写保留原始 [SPEAKER_XX]，说话人映射归一到 canonical
+    姓名 + show notes/roster），会话内 agent 补全 summary/key_points/... 后运行：
+        python -m src.renderer.markdown <name>_handoff.json -o <name>.md
+    渲染脚本按 to_display_label 输出【短名】标签，与 API 链路等价。
+    """
+    print(f"\n原始转录已保存到: {raw_path}")
+    if labeled_path is None:
+        print("（未做说话人分离；如需说话人标签，请提供 HF_TOKEN 后重跑）")
+        record_handoff(output_dir, url, episode.pub_date, raw_path)
+        return
+    print(f"会话输入包（含 Show Notes 与说话人标签）已保存到: {labeled_path}")
+    from src.processor.session_edit import SESSION_SPEC_VERSION
+
+    skeleton = {
+        "title": episode.title,
+        "podcast_name": episode.podcast_name,
+        "pub_date": episode.pub_date,
+        "show_notes": episode.show_notes,
+        "full_text": normalize_quotes(transcript_text),
+        "speaker_mapping": dict(spk_to_label or {}),
+        "speaker_intro": "",
+        "summary": "",
+        "key_points": [],
+        "questions": [],
+        "keywords": [],
+    }
+    json_path = output_dir / f"{safe_name}_handoff.json"
+    json_path.write_text(
+        json.dumps(skeleton, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"会话校订骨架（OutputDoc JSON，v{SESSION_SPEC_VERSION}）已保存到: {json_path}")
+    print(
+        f"→ 在会话内补全 summary / 核心观点 / 问题与思考 / 术语表 / 人物简介"
+        f"（可修正 speaker_mapping），然后运行："
+    )
+    print(f"    python -m src.renderer.markdown {json_path.name} -o {safe_name}.md")
+    print(f"  渲染脚本按 to_display_label 统一输出【短名】标签，与 API 链路等价。")
+    record_handoff(output_dir, url, episode.pub_date, json_path)
 
 
 def process_episode(url, args, output_dir, tracker, transcriber, audio_override, llm_config) -> bool:
@@ -84,6 +135,12 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                 print(f"\n[缓存命中] 该单集已处理过，直接返回既有结果: {cached_md}")
                 print("如需重新转录/整理，请加 --refresh")
                 return True
+            if args.llm_mode == "session":
+                cached_handoff = find_cached_handoff(output_dir, url, episode.pub_date)
+                if cached_handoff is not None:
+                    print(f"\n[会话包缓存命中] 会话包已生成，等待人工校订: {cached_handoff}")
+                    print("完成后请直接校订该输入包；如需重新转录，请加 --refresh")
+                    return True
 
         # --- Step 2: Download audio (or reuse existing WAV) ---
         safe_name = safe_filename(episode.title)
@@ -101,45 +158,97 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
             print(f"  → 音频时长: {fmt_time(duration_sec)}")
         timers["download"] = t.elapsed
 
-        # --- Step 3: Transcribe (复用 transcriber，模型只加载一次) ---
+        # --- Step 3 + 4: 转录 + 说话人解析（会话链路产出命名输入包，由会话内 agent 校对）---
         # 从 Show Notes 解析预期说话人数，作为 diarization 的 K 锚点
         # （常规两人播客：主播 + 单嘉宾；显式 --speakers 优先覆盖）。
-        from src.diarization.show_notes_speakers import parse_speakers_from_show_notes
+        from src.diarization.speaker_resolver import (
+            detect_diarization_issues,
+            parse_roster_with_roles,
+            resolve_and_label,
+        )
 
-        _detected = parse_speakers_from_show_notes(episode.show_notes)
-        num_speakers = args.speakers if args.speakers else (len(_detected) if _detected else None)
-        if _detected:
+        roster = parse_roster_with_roles(episode.show_notes)
+        roster_names = [name for _, name in roster]
+        base_k = args.speakers if args.speakers else (len(roster) if len(roster) >= 2 else None)
+        if roster:
             logger.info(
-                "Step 3: Show Notes 识别到 %d 位说话人（%s），diarization 强制聚成 %s 类",
-                len(_detected), "、".join(_detected), num_speakers,
+                "Step 3: Show Notes 识别到 %d 位说话人（%s），diarization K 锚点=%s",
+                len(roster), "、".join(roster_names), base_k,
             )
-        with Timer() as t:
+
+        # K-retry 质量门：先按 base_k 强制聚类；若检测到「同簇多人自称」合并矛盾
+        # （声线相近者被并成一类，本集失败根因），自动升 K 重对齐（整段重转录约
+        # 数十秒，ASR+对齐缓存按 K 隔离），直到无合并矛盾或试到 base_k+3。
+        transcript = None
+        chosen_k = None
+        merge_issues: list[str] = []
+        can_force_k = transcriber.can_force_num_speakers(duration_sec)
+        transcribe_elapsed = 0.0
+        if base_k and not args.no_diarization and can_force_k:
+            for attempt_k in range(base_k, base_k + 4):
+                logger.info("Step 3/6: 本地转录中（FunASR %s, CPU, K=%d）...", args.model, attempt_k)
+                with Timer() as t:
+                    transcript = transcriber.transcribe(
+                        wav_file, duration_sec,
+                        work_dir=output_dir / ".work" / safe_name,
+                        jobs=args.jobs, num_speakers=attempt_k,
+                        no_diarization=args.no_diarization,
+                    )
+                transcribe_elapsed += t.elapsed
+                tracker.add_transcription(transcript.cost_yuan)
+                segs = transcript.segments
+                issues = detect_diarization_issues(segs, roster)
+                merge_issues = [i for i in issues if "建议提高 K" in i]
+                if merge_issues:
+                    logger.warning("K=%d 质量门：合并矛盾 → %s（升 K 重试）", attempt_k, "；".join(merge_issues))
+                else:
+                    chosen_k = attempt_k
+                    logger.info("K=%d 质量门通过（无合并矛盾）", attempt_k)
+                    break
+                chosen_k = attempt_k
+            if merge_issues:
+                logger.warning("K-retry 至 %d 仍检测到合并矛盾，使用最后一次对齐结果（说话人或需人工复核）", chosen_k)
+                logger.warning(
+                    "人工复核建议：可尝试 --speakers N 手动指定说话人数，"
+                    "或用 --no-diarization 跳过自动分离后人工标注。"
+                )
+        else:
+            if base_k and not args.no_diarization:
+                logger.info("短音频走整段转写路径，强制 K 不生效，跳过 K-retry")
             logger.info("Step 3/6: 本地转录中（FunASR %s, CPU）...", args.model)
-            transcript = transcriber.transcribe(
-                wav_file,
-                duration_sec,
-                work_dir=output_dir / ".work" / safe_name,
-                jobs=args.jobs,
-                num_speakers=num_speakers,
-            )
+            with Timer() as t:
+                transcript = transcriber.transcribe(
+                    wav_file, duration_sec,
+                    work_dir=output_dir / ".work" / safe_name,
+                    jobs=args.jobs, num_speakers=base_k,
+                    no_diarization=args.no_diarization,
+                )
+            transcribe_elapsed += t.elapsed
             tracker.add_transcription(transcript.cost_yuan)
-        timers["transcribe"] = t.elapsed
+            chosen_k = base_k
+
+        timers["transcribe"] = transcribe_elapsed
         char_count = len(transcript.raw_text)
-        rtf = t.elapsed / duration_sec if duration_sec else 0
+        rtf = transcribe_elapsed / duration_sec if duration_sec else 0
         est_2h = int(7200 * rtf)
-        print(f"  → 转录完成：{char_count} 字, {fmt_time(t.elapsed)}, RTF={rtf:.2f}")
+        print(f"  → 转录完成：{char_count} 字, {fmt_time(transcribe_elapsed)}, RTF={rtf:.2f}")
         print(f"  → [估算] 2小时节目约需 {fmt_time(est_2h)}（当前模型: {args.model}）")
+        gate_note = ""
+        if base_k and not args.no_diarization:
+            gate_note = "（质量门通过）" if not merge_issues else "（质量门告警·见上）"
+        print(f"  → 说话人聚类 K={chosen_k}{gate_note}")
 
         raw_path = output_dir / f"{safe_name}_raw.txt"
         raw_path.write_text(transcript.raw_text, encoding="utf-8")
         logger.info("原始转录已保存到 %s", raw_path)
 
-        # --- Step 4: Speaker Diarization (本地，独立于 LLM) ---
-        # SenseVoice 转写自带说话人标签（spk_model 一站式输出，B 方案）时直接使用，
-        # 无需再跑独立 diarize；Paraformer 路径（无 spk 标签）才回退到独立 diarize。
+        # --- Step 4: 说话人标签 + 命名解析（独立于 LLM）---
+        # SenseVoice 转写自带说话人标签（spk_model 一站式输出）时直接使用；
+        # Paraformer 路径（无 spk 标签）才回退到独立 diarize。
         transcript_text = transcript.raw_text
         labeled_segments: list[dict] | None = None
         labeled_path = None
+        resolve_issues: list[str] = []
         if not args.no_diarization:
             with Timer() as t:
                 from src.diarization.speaker_diarization import format_labeled_segments
@@ -155,16 +264,21 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                     )
 
                     logger.info("Step 4/6: 说话人日志（Speaker Diarization，独立模块）...")
-                    diarization_segments = run_diarization(wav_file, num_speakers=num_speakers)
+                    diarization_segments = run_diarization(wav_file, num_speakers=chosen_k)
                     labeled_segments = assign_speakers(transcript.segments, diarization_segments)
                 try:
+                    # 原始 [SPEAKER_XX] 版（保持与历史/LLM 链路一致，供校订脚本逐段贴名）
                     transcript_text = format_labeled_segments(labeled_segments)
+                    # 只做确定性身份核验；无证据的簇保留标签，交给人工或 LLM 校订。
+                    labeled_segments, spk_to_label, resolve_issues = resolve_and_label(labeled_segments, episode.show_notes)
                     labeled_path = output_dir / f"{safe_name}_diarized.txt"
                     labeled_path.write_text(
                         build_session_doc(episode, normalize_quotes(transcript_text)),
                         encoding="utf-8",
                     )
                     logger.info("带说话人标签的转录已保存到 %s", labeled_path)
+                    if resolve_issues:
+                        logger.warning("说话人命名告警：%s", "；".join(resolve_issues))
                 except Exception as e:
                     logger.warning("说话人标签处理失败，跳过: %s", e)
                     transcript_text = transcript.raw_text
@@ -173,61 +287,15 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
         else:
             logger.info("已跳过说话人分离（--no-diarization）")
 
-        if args.no_llm:
-            # 无 LLM 链路：除会话输入包外，一并产出固定的会话内校订规范提示词，
-            # 使"会话内校订"可直接复制执行，规则保持一致（与自动化链路同口径）。
-            print(f"\n原始转录已保存到: {raw_path}")
-            if labeled_path is not None:
-                print(f"会话输入包（含 Show Notes 与说话人标签）已保存到: {labeled_path}")
-                from src.processor.session_edit import (
-                    build_session_prompt,
-                    SESSION_SPEC_VERSION,
-                )
-
-                prompt_path = output_dir / f"{safe_name}_session_prompt.txt"
-                prompt_path.write_text(
-                    build_session_prompt(labeled_path.read_text(encoding="utf-8")),
-                    encoding="utf-8",
-                )
-                print(f"会话内校订提示词（固定规范 v{SESSION_SPEC_VERSION}）已保存到: {prompt_path}")
-                print("（未启用 LLM；将提示词与包内容一起粘贴到 AI 会话，即可按固定规范完成校订与结构化）")
-                # 会话包也算一次完整结果：缓存命中后重跑同样直接返回，避免重复转录
-                record_result(
-                    output_dir,
-                    url,
-                    episode.pub_date,
-                    labeled_path,
-                    provider="",
-                    model="",
-                )
-            else:
-                print("（未启用 LLM 且未做说话人分离；如需说话人标签，请提供 HF_TOKEN 后重跑）")
+        if args.llm_mode == "session":
+            # 会话内校对链路：流水线产出「会话输入包」+ 固定 CLEAN+STRUCT 校订规范，
+            # 由会话内的 agent 按当前规范校对并输出与 API 链路等价结构的 .md。
+            emit_session_handoff(output_dir, url, episode, raw_path, labeled_path, safe_name, spk_to_label=spk_to_label, transcript_text=transcript_text)
+            return True
         else:
             # --- Step 5: LLM Process ---
             with Timer() as t:
-                # 先探测网关可用模型并固定，避免 404 白白消耗配额；失败则降级为会话内链路
-                try:
-                    resolved_llm = llm_processor.resolve_llm_config(llm_config)
-                except Exception as exc:
-                    logger.warning("LLM 模型探测失败，降级为会话内链路: %s", exc)
-                    print(
-                        f"\n[降级] 无法确定可用的 LLM 模型（{exc}），"
-                        "本次改走会话内处理链路。",
-                        file=sys.stderr,
-                    )
-                    print(f"原始转录已保存到: {raw_path}")
-                    if labeled_path is not None:
-                        print(f"会话输入包（含 Show Notes 与说话人标签）已保存到: {labeled_path}")
-                        record_result(
-                            output_dir,
-                            url,
-                            episode.pub_date,
-                            labeled_path,
-                            provider="",
-                            model="",
-                        )
-                    return True
-                logger.info("Step 5/6: %s/%s 分块校订与整理中...", resolved_llm.provider, resolved_llm.model)
+                logger.info("Step 5/6: %s/%s 分块校订与整理中...", llm_config.provider, llm_config.model)
                 try:
                     doc, inp_tok, out_tok = llm_processor.process(
                         episode.title,
@@ -235,7 +303,7 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                         episode.pub_date,
                         episode.show_notes,
                         transcript_text,
-                        llm_config=resolved_llm,
+                        llm_config=llm_config,
                         work_dir=output_dir / ".work" / safe_name,
                         segments=labeled_segments,
                     )
@@ -245,19 +313,21 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                         f"\n[降级] LLM 后处理失败（{exc}），本次改走会话内处理链路。",
                         file=sys.stderr,
                     )
-                    print(f"原始转录已保存到: {raw_path}")
-                    if labeled_path is not None:
-                        print(f"会话输入包（含 Show Notes 与说话人标签）已保存到: {labeled_path}")
-                        record_result(
-                            output_dir,
-                            url,
-                            episode.pub_date,
-                            labeled_path,
-                            provider="",
-                            model="",
-                        )
+                    emit_session_handoff(output_dir, url, episode, raw_path, labeled_path, safe_name, spk_to_label=spk_to_label, transcript_text=transcript_text)
                     return True
                 tracker.add_llm_usage(inp_tok, out_tok)
+                if merge_issues:
+                    doc.warnings.append(
+                        f"K-retry 在 K={base_k}..K={chosen_k} 均检测到合并矛盾，"
+                        f"说话人映射可能不准确，请人工复核文稿中的【SPEAKER_XX】残留标签。"
+                    )
+                try:
+                    assert_valid_output_doc(doc)
+                except ValueError as exc:
+                    logger.warning("LLM 成品校验失败，降级为会话内链路: %s", exc)
+                    print(f"\n[降级] {exc}，本次改走会话内处理链路。", file=sys.stderr)
+                    emit_session_handoff(output_dir, url, episode, raw_path, labeled_path, safe_name, spk_to_label=spk_to_label, transcript_text=transcript_text)
+                    return True
             timers["process"] = t.elapsed
 
             # --- Step 6: Write output ---
@@ -269,21 +339,28 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                 }
                 doc.timings = timers
                 md_content = build_output_markdown(doc)
-                output_path = output_dir / f"{safe_name}.md"
+                degraded = bool(doc.warnings)
+                output_path = output_dir / f"{safe_name}{'.degraded' if degraded else ''}.md"
                 output_path.write_text(md_content, encoding="utf-8")
-                record_result(
-                    output_dir,
-                    url,
-                    episode.pub_date,
-                    output_path,
-                    provider=resolved_llm.provider,
-                    model=resolved_llm.model,
-                )
+                if not degraded:
+                    record_result(
+                        output_dir,
+                        url,
+                        episode.pub_date,
+                        output_path,
+                        provider=llm_config.provider,
+                        model=llm_config.model,
+                    )
             timers["write"] = t.elapsed
 
             total_time = sum(timers.values())
             print(f"\n{'='*50}")
-            print("[OK] 完成！")
+            if degraded:
+                print("[WARN] 已产出降级文稿，未写入最终结果缓存！")
+                for warning in doc.warnings:
+                    print(f"  - {warning}")
+            else:
+                print("[OK] 完成！")
             print(f"  输出文件: {output_path}")
             print(f"  总耗时: {fmt_time(total_time)}")
             print(f"  费用: {tracker.summary()}")
@@ -303,7 +380,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="撷声 - 输入小宇宙播客单集链接，输出结构化 Markdown 文稿"
     )
-    parser.add_argument("urls", nargs="*", help="小宇宙播客单集链接（可传多个；模型只加载一次，逐期转录；--server 模式可省略）")
+    parser.add_argument(
+        "urls", nargs="*",
+        help="小宇宙播客单集链接（可传多个；模型只加载一次，逐期转录；--server 模式可省略）",
+    )
     parser.add_argument("-o", "--output", default="output", help="输出目录 (默认: output/)")
     parser.add_argument("--model", default="sensevoice-small", choices=["sensevoice-small", "paraformer-large"],
                         help="ASR 模型（默认 sensevoice-small；paraformer-large 支持热词与字级时间戳）")
@@ -311,7 +391,11 @@ def main() -> None:
                         help="LLM 后处理提供方 (默认: qwen)")
     parser.add_argument("--llm-model",
                         help="覆盖提供方的默认模型；可用逗号分隔指定多个候选，按顺序回退（如 qwen3.7-plus,gpt-5.2）")
-    parser.add_argument("--no-llm", action="store_true", help="仅转录，不进行 LLM 后处理")
+    parser.add_argument("--llm-mode", choices=["api", "session"], default=None,
+                        help="LLM 校对方式：api=流水线调用 LLM API（需 API Key）；"
+                             "session=在会话内由 agent 校对（无需 Key）。省略时自动检测（有 Key→api，无→session）")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="[弃用] 等价于 --llm-mode session，后续版本移除")
     parser.add_argument("--no-diarization", action="store_true", help="跳过说话人日志，不区分说话人")
     parser.add_argument("--speakers", type=int, help="已知说话人数；默认自动检测")
     parser.add_argument(
@@ -322,7 +406,8 @@ def main() -> None:
     parser.add_argument("--audio", type=Path, help="复用已存在的 16k mono WAV，跳过下载与转换（仅单链接时有效）")
     parser.add_argument(
         "--batch-size-s", type=int, default=60,
-        help="FunASR VAD 批切段时长（秒，默认 60）。越大单次送入音频越长、调用次数越少但峰值内存越高；内存紧张默认保守，可在 90/120 间 A/B 验证后上调",
+        help="FunASR VAD 批切段时长（秒，默认 60）。越大单次送入音频越长、调用次数越少但峰值内存越高；"
+             "内存紧张默认保守，可在 90/120 间 A/B 验证后上调",
     )
     parser.add_argument(
         "--jobs", type=int, default=2,
@@ -347,6 +432,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.server:
+        if args.urls:
+            parser.error("--server 只启动常驻转写服务，不能同时传入单集 URL")
         from src.server import start_server
 
         start_server(
@@ -357,15 +444,25 @@ def main() -> None:
         )
         return
 
+    if not args.urls:
+        parser.error("缺少小宇宙播客单集链接（--server 模式可省略 URL）")
+
     llm_config = get_llm_config(args.llm_provider, args.llm_model)
-    if not args.no_llm and not llm_config.api_key:
+    # 解析有效 LLM 模式：显式 --llm-mode > 弃用 --no-llm > 自动检测（有 Key→api，无→session）
+    if args.no_llm:
+        print("警告：--no-llm 已弃用，等价于 --llm-mode session，后续版本移除。", file=sys.stderr)
+        args.llm_mode = "session"
+    if args.llm_mode is None:
+        args.llm_mode = "api" if llm_configured() else "session"
+        if args.llm_mode == "session":
+            print("未完整检测到 LLM_API_KEY 与 LLM_BASE_URL，自动进入会话内校对链路（session）。", file=sys.stderr)
+    elif args.llm_mode == "api" and not llm_configured():
         print(
-            "未检测到 LLM API Key（LLM_API_KEY / LLM_BASE_URL 未设置），"
-            "自动进入免费会话内处理链路。\n"
-            "如需自动化校订，请配置这两个环境变量后再运行；当前以 --no-llm 继续。",
+            "警告：已指定 --llm-mode api 但未同时检测到 LLM_API_KEY 与 LLM_BASE_URL，"
+            "降级为会话内链路（session）。",
             file=sys.stderr,
         )
-        args.no_llm = True
+        args.llm_mode = "session"
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -391,6 +488,11 @@ def main() -> None:
         from src.server import HttpTranscriber
 
         transcriber = HttpTranscriber(base_url=args.use_server, model_name=args.model)
+        try:
+            transcriber.ensure_model()
+        except Exception as exc:
+            print(f"错误：常驻转写服务不可用或模型不匹配: {exc}", file=sys.stderr)
+            sys.exit(1)
     else:
         from src.transcriber.funasr_transcriber import FunASRTranscriber
 

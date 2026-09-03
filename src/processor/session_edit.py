@@ -1,6 +1,6 @@
-"""Deterministic in-session transcript editing (the no-LLM path).
+"""Deterministic in-session transcript editing (the session-link path).
 
-The ``--no-llm`` path hands the user a self-contained session package
+The session-link (``--llm-mode session``) hands the user a self-contained session package
 (``<episode>_diarized.txt``) and asks an AI chat session to do the cleaning and
 structuring. Without a fixed spec that work has been ad-hoc: quality varies run
 to run and there is no way to check the result.
@@ -23,25 +23,41 @@ import re
 import sys
 from pathlib import Path
 
-from src.config import DEFAULT_LLM_PROVIDER, LLM_MODELS, get_llm_config
+from src.config import DEFAULT_LLM_PROVIDER, LLM_MODELS, get_llm_config, llm_configured
+from src.diarization.speaker_resolver import COMMON_ALIASES
+from src.utils import SPEAKER_LABEL_RE
 
 logger = logging.getLogger(__name__)
 
 # 改动 SESSION_RULES 或输出结构时必须递增，让旧产出可与新规则区分。
+# v13：人物简介允许「（无）」，与自动渲染路径对齐；不确定人物信息时不编造。
+# v12：核心观点原话由 > 引用块改为行内直角引号「」（跟在展开句后）；观点内特有术语用缩进子条目就近解释；「关键词」小节更名「术语表」，只保留无法归入观点的残留术语（0 起、不强制 4-8），排除播客名/节目名/嘉宾名/平台名等专名。
+# v17：核心观点改为「观点句、展开论述句、引用句」三段顺次相接、彼此用空格分隔，
+#      禁止「**观点句**：展开」的框架式冒号（观点句内部必要冒号可保留，整句仍以句号收尾）。
+#      根因：api 链路 markdown.py 曾硬编码该冒号，每期必带；渲染器改为确定性无冒号后，
+#      与 session 路径规则对齐，校验器同步拦截。
+# v18：问题与思考的「问题」须整句加粗、序号留在加粗外（1. **问题？**），答案不加粗；
+#      新增校验器拦截未加粗的问题行。渲染侧 markdown.py::_as_bold_question 确定性加粗
+#      （question 自带 ** 时先剥再包，避免双重加粗）。
+# v16：全文转录新增「同一说话人相邻段落必须合并」硬规则（校订规则第 5 条）与校验器
+#      （连续 ≥3 段同标签即告警）。根因：源转录按停顿切碎 + diarization 把同一人判成
+#      多个簇，LLM 是否合并不可控；脚本侧由 src.utils.merge_same_speaker_blocks 兜底。
+# v15：校订规则第 1 条扩展「断句」覆盖句间过度切分（相邻两句本应逗号连读却被句号拆开），新增校验器检测全文转录标点过度切分（同话轮大量极短句）。
+# v14：问题与思考强化——答案须直接解答问题、不得结尾反抛新问号；说话人指代须首次点明「姓名（身份）」、禁止裸代词；问题须提炼全文核心议题。
 # v11：「Show Notes」纳入「输出结构」必需小节并统一为二级标题 ## Show Notes（与自动渲染路径 markdown.py 对齐）；REQUIRED_HEADINGS 增加 ## Show Notes。
 # v10：「内容提要」+「闪光语句」合并为「核心观点」——每条核心观点可附一句可选原话（> 引用块）；移除独立「闪光语句」小节。
 # v9：校订规则新增 GB/T 15834-2011 标点规范——引号/书名号并列不用顿号；并新增校验器拦截。
 # v8：闪光语句改回正文格式（独立成段、不标注说话人、不用引用块）；v7 的 > 块+——说话人 作废。
 # v7：问题与思考改 1. 编号且问答分行；关键词补句号；全文转录说话人改【身份姓名】；
 #     新增第 10 条禁止「大纲」板块与 mermaid 思维导图。
-SESSION_SPEC_VERSION = 11
+SESSION_SPEC_VERSION = 18
 
 REQUIRED_HEADINGS = (
     "## Show Notes",
     "## 摘要",
     "## 核心观点",
     "## 问题与思考",
-    "## 关键词",
+    "## 术语表",
     "## 人物简介",
     "## 全文转录",
 )
@@ -66,26 +82,27 @@ SESSION_RULES = """你是一名专业的中文播客文稿编辑。下面是一�
 
 ## 核心观点
 
-- **主题句。** 支撑证据或展开说明（1-2 句）
-（提炼节目中所有重要观点，不限制条数，以覆盖完整为准；每条以完整主题句开头、句号结尾，加粗部分必须是完整句子，只用一次加粗；若某观点有特别值得单独收录、能体现它的原话，在主题句下一行用 > 引用块附上该原话——忠实原文、不加引号、不改写，关键短语可加粗；**无则不加，不要为每条强行配原话**）
+- **观点句。** 展开论述句（1-2 句）「值得单独收录的原话」
+  - **观点内特有术语**：1-2 句就近解释。
+（提炼节目中所有重要观点，不限制条数，以覆盖完整为准；每条固定为「观点句、展开论述句、引用句」三段顺次相接，彼此用空格分隔——**主题句必须是完整陈述句、以句号结尾，后面直接接空格和展开句，严禁用冒号把展开句挂在主题句后面**；反例「**AI 产品的第三个时代：常驻同事**：Tara 把演进划为三段」应写成「**AI 产品的第三个时代：常驻同事。** Tara 把演进划为三段」——主题句内部必要的冒号可保留，但整句仍以句号收尾；加粗只覆盖观点句、每条只用一次加粗；若有特别值得单独收录、能体现该观点的原话，直接跟在展开句后、用直角引号「」包裹（不加冒号、不单独成引用块）——忠实原文、不改写，关键短语可加粗；**无则不加，不要为每条强行配原话**；**观点中出现、读者可能不懂的特有术语**（如「第一性原理」「第二曲线」这类概念性词汇），在观点条目下用缩进的 `  - **术语**：解释` 子条目就近说明，只解释术语本身、不重复观点内容）
 
 ## 问题与思考
 
-1. 核心问题（整理式，非原文照抄）？
+1. **核心问题（整理式，非原文照抄）？**
 
-   对应的思考或回答（1-3 句，经提炼整理，不与原句逐字重复）
+   对应的思考或回答（直接解答该问题，1-3 句，引用人物须点明身份，不与原句逐字重复）
 
-（筛选 3-5 个最值得关注、最能引发思考的问题与回答；须为节目真正讨论过的核心议题，不是随机摘取的全文提问；用 1. 2. 3. 编号，问题单独占一行、以问号结尾，换行后另起一行写答案；可与核心观点互补但不重复——若某点已在核心观点中作为论点展开，这里转而呈现其「追问与张力」，不要复述同一结论）
+（筛选 3-5 个最值得关注、最能引发思考的问题与回答；须为节目真正讨论过的核心议题，须提炼全文真正核心的内容与张力，不是随机摘取或边缘追问；用 1. 2. 3. 编号，**序号写在加粗外、问题整句加粗**（`1. **问题？**`），问题单独占一行、以问号结尾，换行后另起一行写答案且答案不加粗；**每个答案必须直接解答该问题**——给出结论或核心讨论要点，结尾不得再抛未回答的新问号把问题丢回读者；答案若引用节目人物，首次出现须写明「姓名（身份/头衔）」，禁止用无先行词的裸代词「他/她」开头——节目常有多位说话人（嘉宾与主持人），须明确区分谁在发言、谁的观点在被讨论；可与核心观点互补但不重复——若某点已在核心观点中作为论点展开，这里转而呈现其「追问与张力」，不要复述同一结论）
 
-## 关键词
+## 术语表
 
-- **关键词**：1-2 句解释。
-（提取 4-8 个贯穿节目主题的核心概念、专名或术语，避免一次性细碎名词；每条以「**关键词**：解释」呈现，解释须以句号结尾）
+- **残留术语**：1-2 句解释。
+（只放**无法归入任一核心观点术语子条目**的残留术语，0-4 个、没有可留空；**必须排除播客名、节目名、嘉宾姓名、平台名等专名**——这些不是术语；已在核心观点子条目里解释过的概念不得重复出现；每条以「**术语**：解释」呈现，解释须以句号结尾）
 
 ## 人物简介
 
 **身份姓名**：简介
-（每人一行，正文格式，不用引用；身份依据 Show Notes 与对话内容，不确定时不编造）
+（每人一行，正文格式，不用引用；身份依据 Show Notes 与对话内容，不确定时不编造。若无法确认任何人物信息，本节输出「（无）」）
 
 ## 全文转录
 
@@ -94,7 +111,9 @@ SESSION_RULES = """你是一名专业的中文播客文稿编辑。下面是一�
 
 ## 校订规则
 
-1. 忠实保留原文：不改写、不缩写、不省略、不添加原文没有的信息；只修正语音识别的同音错字、专名错误、繁简混用、标点和明显语病；**修正被错误断句的连贯短语——不要在连贯短语中间插入句号造成切断（例如「好不好找工作」被拆成「好。不好找工作」），应按语义连读还原为完整短语**。
+1. 忠实保留原文：不改写、不缩写、不省略、不添加原文没有的信息；只修正语音识别的同音错字、专名错误、繁简混用、标点和明显语病；**修正被错误断句的标点切分，分两类**：
+   - (a) 连贯短语/复合词中间被句号切断（例：「好。不好找工作」应连读为「好不好找工作」；「脑力。劳动者」应合并为「脑力劳动者」）；
+   - (b) 句间过度切分：相邻两句本属同一逻辑句、应以逗号连接，却被句号拆成两个短句（例：「我们准备这次聊天的时候。我问你。」应改为「我们准备这次聊天的时候，我问你，」；「现在，作为打造这些产品的 leader。最难的事情之一。在我看来，就是流程的倒置。」应连读为「现在，作为打造这些产品的 leader，最难的事情之一，在我看来，就是流程的倒置。」）。按语义连读还原为「逗号连接的长句」，不要在每个自然停顿处都补句号。
 2. 说话人映射：根据 Show Notes 与对话内容把 [SPEAKER_XX] 替换为【身份+姓名】（如【主播XX】【嘉宾XX】）。**注意：说话人标签按时间段聚类，一段内可能混入多位说话人（快速问答、无缝接话时尤甚）**：
    - 若一段内出现两个不同人物的人称自述（如“我是A”与“我叫B”同时出现）或明显的问答交替、接话，判定为**多人混段**，必须**按语义拆分为独立段落**并分别标注真实说话人（如【主播XX】与【嘉宾XX】各自成段）；不要机械照搬整段标签，也不要按段首内容给整段贴【】。
    - 语义无法可靠拆分时，保留 [SPEAKER_XX] 不猜测。
@@ -102,9 +121,9 @@ SESSION_RULES = """你是一名专业的中文播客文稿编辑。下面是一�
    - **话轮边界特别警惕**：一段的结尾句若明显开启下一个话题、且下一段以「这个/那/其实/对」等接话词延续同一思路，边界可能被放错——确认尾句归属后再定标签，不要把后一位说话人的开场句误贴给前一位（例如前一段尾句「我最近在做一系列招聘项目」若与下一段「这个同感主要…」连成同一话题，应归给同一说话人）。
 3. 删除“嗯、啊、那个”等无意义填充词；“然后、那”只有确属填充词时才删除。
 4. 保留“但是、所以、其实、不过”等逻辑转折词。
-5. 段落按语义自然分段，每段 2-4 句为宜；同一说话人连续多段只在第一段标注说话人。
+5. 段落按语义自然分段，每段 2-4 句为宜；**同一说话人的相邻段落必须合并为一段**：源转录按语音停顿切碎，同一人常被切成连续多段，甚至被 diarization 判成多个说话人簇（如 [SPEAKER_01] 与 [SPEAKER_03] 实为同一人）——这些相邻段不得各自贴一次【标签】、更不得拆成多行多段，必须并成同一段、只在该说话人发言开头贴一次标签；**只有在说话人真正切换时才另起一段**。
 6. 双引号统一使用中文直角引号「」（英文术语、代码、URL 内的可保留英文引号）。标有引号或书名号的并列成分之间通常不用顿号（GB/T 15834-2011）：「甲」「乙」或《甲》《乙》直接并列即可，顿号多余；例外是并列项之间有括注等插入成分时宜用顿号。
-7. 摘要、核心观点、问题与思考、关键词、人物简介都只基于会话包内容生成，不编造原文没有的信息。
+7. 摘要、核心观点、问题与思考、术语表、人物简介都只基于会话包内容生成，不编造原文没有的信息。
 8. 只校订，不创作：不扩写观点、不补充背景、不总结替代原文。
 9. 全文转录信息量硬线：保留原文全部事例、数字与对话原貌，口语长叙述不得压缩成概要；校验器以「全文转录 ≥ 原始转录 50%」为硬线（低于 50% 判为过度删减）。若已触发，用 `python -m src.processor.rebuild_transcript <会话包> -o <md>` 从会话包保真重建全文转录后再校订，不要手工重写压缩版。
 10. 禁止额外板块：不得生成「大纲」小节，也不得用 mermaid 画思维导图（之前约定已删除该板块）。输出结构严格以上方「输出结构」所列小节为准，不得增删小节。
@@ -150,6 +169,44 @@ def _split_sections(md_text: str) -> dict[str, str]:
     return sections
 
 
+# 自称校验去噪：这些语素出现在「我是 Y」之后时，Y 多为自述性描述而非他人姓名。
+_NON_NAME_MORPH = set(
+    "人生产友者的是个一这那做在就否很太不啊呢吧吗嘛跟和与会与告诉"
+    "你们他们她们我们之乎也者给被把让叫为及或都更最觉想说看听批拌紧绷"
+)
+
+# 职业/头衔词：出现在「我是 Y」里时，Y 是身份/职业自述而非他人姓名。
+# 例：Lenny 说「我是设计师」——他本就是主持人，讲职业背景，非串标（连漪确认 OK）。
+_PROFESSION_WORDS = {
+    "设计师", "工程师", "程序员", "架构师", "产品经理", "项目经理", "研究员",
+    "科学家", "教授", "博士", "导师", "老师", "学生", "医生", "护士", "律师",
+    "法官", "记者", "编辑", "作者", "作家", "诗人", "艺术家", "画家", "音乐家",
+    "歌手", "演员", "导演", "主持人", "主播", "投资人", "创始人", "联创",
+    "合伙人", "老板", "经理", "总裁", "总监", "行长", "局长", "校长", "院长",
+    "公务员", "军人", "警察", "消防员", "厨师", "司机", "工人", "农民", "商人",
+    "企业家", "分析师", "顾问", "教练", "裁判", "运动员", "模特", "网红", "博主",
+    "运营", "销售", "会计", "翻译", "码农", "白领",
+}
+
+
+def _is_plausible_self_name(y: str) -> bool:
+    """判断「我是 Y」里的 Y 是否像一个人名（值得作为说话人错位信号）。
+
+    仅 2-3 字纯中文（且不含非姓名语素）或 2-4 字母的拉丁名才算；
+    「我是拌面 / 我是真人 / 我是本科学历 / 我是设计师」等自述性短语返回 False，
+    避免把本人真实自述或职业背景误判为说话人错位。
+    """
+    if not y:
+        return False
+    if y in _PROFESSION_WORDS:
+        return False
+    if re.fullmatch(r"[一-龥]{2,3}", y):
+        return not any(ch in _NON_NAME_MORPH for ch in y)
+    if re.fullmatch(r"[A-Za-z]{2,4}", y):
+        return True
+    return False
+
+
 def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
     """Return a list of problems with ``md_text`` (empty list means OK).
 
@@ -164,13 +221,16 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
             problems.append(f"缺少必需小节：{heading}")
             continue
         body = sections[heading].strip()
-        if not body:
+        if not body and heading != "## 术语表":
+            # 术语表为「残留术语」区：允许 0 条（标题仍需存在，见上）
             problems.append(f"小节为空：{heading}")
 
     # 来源行：须含播客名 | 节目标题 | 日期 三要素（在标题后、首个 ## 前）
     head_part = md_text.split("## ", 1)[0] if "## " in md_text else md_text
     if "> 来源：" in head_part:
-        src_line = next((l for l in head_part.splitlines() if l.strip().startswith("> 来源：")), "")
+        src_line = next(
+            (line for line in head_part.splitlines() if line.strip().startswith("> 来源：")), ""
+        )
         if src_line.count("|") < 2:
             problems.append("来源行应含三要素（播客名 | 节目标题 | 播出日期），当前仅 " + src_line.strip())
     else:
@@ -182,9 +242,22 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
 
     # 核心观点：条数不限，但每项须以加粗主题句开头
     kp = sections.get("## 核心观点", "")
-    kp_items = [line for line in kp.splitlines() if line.strip().startswith("- ")]
+    kp_lines = kp.splitlines()
+    kp_items = [line for line in kp_lines if line.strip().startswith("- ")]
     if kp_items and not all(re.search(r"\*\*.+\*\*", item) for item in kp_items):
         problems.append("核心观点中存在未加粗的条目（每条要点须以 **加粗主题句** 开头）")
+
+    # 核心观点：禁止「**观点句**：展开」的框架式冒号（v17）——本节是「观点句、
+    # 展开论述句、引用句」三段顺次相接，主题句以句号收尾后直接空格接展开句。
+    # 缩进的术语子条目（  - **术语**：解释）是定义式标签，不受本条限制。
+    for _kp_line in kp_lines:
+        if re.match(r"^-\s+\*\*.+?\*\*\s*[:：]", _kp_line):
+            problems.append(
+                "核心观点主题句后不应使用冒号引出展开（如「**观点句**：展开」），"
+                "应改为「**观点句。** 展开论述句「引用句」」三段顺次相接、空格分隔"
+                "（主题句内部必要冒号可保留，但整句须以句号收尾）"
+            )
+            break
 
     # 问题与思考：1. 2. 编号、问答分行，禁用带圈数字 ①②③ 与同行「**问题？** 答案」
     qt_body = sections.get("## 问题与思考", "")
@@ -195,26 +268,42 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
             problems.append("问题与思考应使用 1. 2. 编号（问题单独一行，答案换行另写）")
         if re.search(r"^\s*-\s+\*\*.+?\?\*\*\s+\S", qt_body, re.MULTILINE):
             problems.append("问题与思考不应把问题与答案写在同行（旧格式 **问题？** 答案），应 1. 编号、问题单独一行、答案换行另写")
+        # v18：问题须整句加粗、序号留在加粗外——问题比答案更该先跳出来
+        if re.search(r"^\s*\d+\.\s+(?!\*\*)", qt_body, re.MULTILINE):
+            problems.append("问题与思考的问题须整句加粗、序号留在加粗外（写成 1. **问题？**），答案不加粗")
+        # 答案不得结尾反抛新问号：直接解答，而非把问题丢回读者
+        for _blk in re.split(r"(?m)^\s*\d+\.", qt_body):
+            _lines = [ln.rstrip() for ln in _blk.splitlines() if ln.strip()]
+            if not _lines:
+                continue
+            _ans = _lines
+            for _i, _ln in enumerate(_lines):
+                if _ln.endswith("？") or _ln.endswith("?"):
+                    _ans = _lines[_i + 1:]
+                    break
+            if _ans and (_ans[-1].endswith("？") or _ans[-1].endswith("?")):
+                problems.append("问题与思考的答案不应以新问号结尾（须直接解答该问题，勿把问题抛回读者）")
+                break
 
-    # 关键词：4-8 条，每项为 **关键词**：解释，且解释以句号结尾
-    keywords = [line for line in sections.get("## 关键词", "").splitlines() if line.strip().startswith("- ")]
-    if keywords:
-        if not 4 <= len(keywords) <= 8:
-            problems.append(f"关键词应提取 4-8 个（实际 {len(keywords)}）")
-        if not all(re.search(r"\*\*.+?\*\*[:：]", item) for item in keywords):
-            problems.append("关键词中存在格式不符的条目（每条须为 **关键词**：解释）")
-        if not all(item.rstrip().endswith(("。", ".")) for item in keywords):
-            problems.append("关键词每条解释须以句号结尾")
+    # 术语表：残留术语 0 起（不强制条数），有条目时每项为 **术语**：解释，且解释以句号结尾
+    terms = [line for line in sections.get("## 术语表", "").splitlines() if line.strip().startswith("- ")]
+    if terms:
+        if not all(re.search(r"\*\*.+?\*\*[:：]", item) for item in terms):
+            problems.append("术语表中存在格式不符的条目（每条须为 **术语**：解释）")
+        if not all(item.rstrip().endswith(("。", ".")) for item in terms):
+            problems.append("术语表每条解释须以句号结尾")
 
     # 人物简介：每人一行正文（**身份**：简介），不用引用
     intro = sections.get("## 人物简介", "")
     intro_lines = [line for line in intro.splitlines() if line.strip()]
     if intro:
-        if not intro_lines:
-            problems.append("人物简介为空")
-        elif any(l.strip().startswith(">") for l in intro_lines):
+        if intro.strip() == "（无）":
+            pass
+        elif not intro_lines:
+            problems.append("人物简介为空；无法确认任何人物信息时应输出「（无）」")
+        elif any(line.strip().startswith(">") for line in intro_lines):
             problems.append("人物简介不应使用引用格式（> 开头），请用正文格式 **身份**：简介")
-        elif not all(re.match(r"^\*\*.+?\*\*[:：]", l.strip()) for l in intro_lines):
+        elif not all(re.match(r"^\*\*.+?\*\*[:：]", line.strip()) for line in intro_lines):
             problems.append("人物简介条目应为 **身份姓名**：简介 格式")
 
     # 全文转录：说话人须用中文方括号【身份姓名】，不得用 **加粗**：样式
@@ -222,13 +311,17 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
     if re.search(r"^\s*\*\*.+?\*\*[:：]", transcript, re.MULTILINE):
         problems.append("全文转录说话人应使用中文方括号【身份姓名】，不要用 **加粗**：样式")
     # 全文转录：不得残留未映射的 SPEAKER 标签（混段无法可靠拆分时可保留，但需人工复核）
-    leftover = re.findall(r"\[SPEAKER_\d+\]", transcript)
+    leftover = SPEAKER_LABEL_RE.findall(transcript)
     if leftover:
         problems.append(
             f"全文转录残留未映射的说话人标签（混段无法可靠拆分时可保留，但需复核）：{sorted(set(leftover))}"
         )
 
     # 全文转录：说话人标签与自称一致性（启发式标红疑似错位，不自动改）
+    # 去噪：①谐音别名（小猪→小朱、秋秋→湫湫）按 COMMON_ALIASES 归一后再比对；
+    #       ②只在 Y 像「人名」时才判错位——自述性短语（我是拌面/我是真人/我是本科学历）
+    #         含人/生/友/者/的/做/在…语素，或非 2-3 字中文、非 2-4 字母，一律视为本人真实
+    #         自述，跳过，避免把口语自述误判为说话人错位。
     for m in re.finditer(r"^【([^】]+)】", transcript, re.MULTILINE):
         label = m.group(1)
         label_core = re.sub(r"^(主播|嘉宾|主持人|老师|同学|教授|博士|先生|女士)", "", label).strip()
@@ -239,7 +332,16 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
             r"我(?:是|叫|们是|就是)\s*([\u4e00-\u9fa5A-Za-z]{1,8})(?=[，。！？；、\s])", seg
         ):
             y = sm.group(1).strip()
-            if y and y != label_core and y not in ("做", "在", "一个", "这个", "那个", "他们", "她们"):
+            if not y:
+                continue
+            # ① 谐音别名归一：归一后即等于本段标签，属正确自述，跳过
+            y_norm = COMMON_ALIASES.get(y, y)
+            if y_norm == label_core:
+                continue
+            # ② 仅当 Y 像人名才判错位；自述性短语（属性/描述）跳过去噪
+            if not _is_plausible_self_name(y):
+                continue
+            if y != label_core:
                 problems.append(
                     f"全文转录中【{label}】段落出现自称「我是{y}」等指向他人「{y}」的表述，"
                     f"疑似说话人标签错位，请人工复核该段归属"
@@ -262,6 +364,29 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
                 f"（{_top_n / _total:.0%}），疑似 diarization 失败或说话人标签归并错误，请人工复核"
             )
 
+    # 全文转录：同一说话人相邻多段未合并（v16）
+    # 源转录按语音停顿切碎、同一人还常被判成多个簇，校订后若仍连续多段同标签，
+    # 观感极碎且违反校订规则第 5 条。此处只标红提醒，不自动改（避免误并真实轮次）；
+    # 确定性合并用 src.utils.merge_same_speaker_blocks。
+    _spk_seq = [m.group(1) for m in re.finditer(r"^【([^】]+)】", transcript, re.MULTILINE)]
+    if _spk_seq:
+        _cur_label, _cur_len = _spk_seq[0], 1
+        _max_label, _max_len = _spk_seq[0], 1
+        for _prev, _cur in zip(_spk_seq, _spk_seq[1:]):
+            if _cur == _prev:
+                _cur_len += 1
+                if _cur_len > _max_len:
+                    _max_label, _max_len = _prev, _cur_len
+            else:
+                _cur_label, _cur_len = _cur, 1
+        if _max_len >= 3:
+            problems.append(
+                f"全文转录中【{_max_label}】连续 {_max_len} 段未合并：同一说话人的相邻段落必须合并为一段"
+                "（源转录按语音停顿切碎，同一人还常被 diarization 判成多个簇），"
+                "只有说话人真正切换时才另起一段（见校订规则第 5 条）；"
+                "可用 src.utils.merge_same_speaker_blocks 确定性合并"
+            )
+
     if source_text and transcript:
         ratio = len(transcript) / max(len(source_text), 1)
         if ratio < 0.5:
@@ -278,12 +403,50 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
     if "```mermaid" in md_text or re.search(r"^\s*mindmap\s*$", md_text, re.MULTILINE):
         problems.append("不得生成 mermaid 思维导图，请移除相关代码块")
 
+    # 代码块围栏完整性：v12 七段结构（Show Notes/摘要/核心观点/问题与思考/
+    # 术语表/人物简介/全文转录）均为标题+列表+段落，无代码块需求；
+    # 任何 ``` 围栏（含未闭合）都属异常，需移除（引用原文用「」或缩进，勿用 ```）。
+    # 这是「内容被整段塞进未闭合代码块」类问题的机器可验硬约束（api 链路由
+    # build_output_markdown 纯函数保证无围栏，此规则主要兜 session 链路/手动稿）。
+    fence_count = md_text.count("```")
+    if fence_count:
+        if fence_count % 2 != 0:
+            problems.append(
+                f"检测到 {fence_count} 个代码块围栏（奇数，未闭合）：v12 结构不应含代码块，"
+                "请移除多余围栏（引用原文用「」或缩进，勿用 ```）"
+            )
+        else:
+            problems.append(
+                f"检测到 {fence_count} 个代码块围栏：v12 结构不应含代码块，请移除"
+                "（引用原文用「」或缩进，勿用 ```）"
+            )
+
     # 标点：标有引号或书名号的并列成分之间不用顿号（GB/T 15834-2011）
     if re.search(r'([”」』》"])、([「『《“"])', md_text):
         problems.append(
             "标有引号或书名号的并列成分之间不应使用顿号（GB/T 15834-2011），"
             "如「甲」「乙」或《甲》《乙》直接并列即可，顿号多余"
         )
+
+    # 全文转录标点过度切分检测：同一说话人话轮内若出现大量极短句（每个自然停顿都补了句号），
+    # 判定为 ASR 标点过度切分，应改为逗号连接的长句（见校订规则第 1 条 (b)）。
+    _trans_m = re.search(r"##\s*全文转录\s*\n(.*)$", md_text, re.DOTALL)
+    if _trans_m:
+        for _tline in _trans_m.group(1).splitlines():
+            _lm = re.match(r"^【[^】]*】\s*(.*)$", _tline)
+            if not _lm:
+                continue
+            _tbody = _lm.group(1).strip()
+            if not _tbody:
+                continue
+            _tsents = [s for s in re.split(r"[。？！]", _tbody) if 0 < len(re.sub(r"\s", "", s)) <= 12]
+            if len(_tsents) >= 5:
+                problems.append(
+                    "全文转录疑似标点过度切分：同一话轮内出现大量极短句（每个自然停顿都补了句号），"
+                    f"如「{_tsents[0][:12]}」。应按语义连读为逗号连接的长句，而非逐停顿断句"
+                    "（见校订规则第 1 条 (b)）"
+                )
+                break
 
     return problems
 
@@ -319,23 +482,20 @@ def _strip_unwanted_sections(md_text: str) -> str:
 
 
 def _run_with_llm(package_text: str, llm_config) -> str:
-    """Run the fixed session prompt through the LLM once and return the markdown."""
-    from src.processor.llm_processor import resolve_llm_config
+    """Run the fixed session prompt through the LLM and validate completion."""
+    from src.processor.llm_processor import _request_text, resolve_llm_config
 
     config = resolve_llm_config(llm_config)
     from openai import OpenAI
 
     client = OpenAI(api_key=config.api_key, base_url=config.base_url)
-    response = client.chat.completions.create(
-        model=config.model,
-        messages=[
-            {"role": "system", "content": SESSION_RULES},
-            {"role": "user", "content": package_text},
-        ],
-        temperature=0.1,
+    content, _, _ = _request_text(
+        client,
+        config.model,
+        SESSION_RULES,
+        package_text,
         max_tokens=32_000,
     )
-    content = response.choices[0].message.content or ""
     return content.strip()
 
 
@@ -345,11 +505,34 @@ def _extract_source(line: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _run_check(md_path: Path) -> None:
+    """校验已有 .md（运行 validate_session_output），打印问题后退出。
+
+    供会话链路交付前自检：任何 .md 落盘后跑一遍，0 问题才交付，
+    避免代码块未闭合等结构问题被遗漏（api 链路由 build_output_markdown
+    纯函数保证无围栏，此检查主要兜 session 链路/手动稿）。
+    """
+    if not md_path.exists():
+        print(f"错误：找不到文件 {md_path}", file=sys.stderr)
+        sys.exit(1)
+    md = md_path.read_text(encoding="utf-8")
+    problems = validate_session_output(md)
+    if problems:
+        print(f"校验未通过（{len(problems)} 项）：", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        sys.exit(2)
+    print("校验通过。")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="撷声会话内校订：生成固定校订提示词，或用 LLM 自动完成并校验"
     )
-    parser.add_argument("package", type=Path, help="会话输入包（<节目名>_diarized.txt）")
+    parser.add_argument("package", type=Path, nargs="?",
+                        help="会话输入包（<节目名>_diarized.txt）；与 --check 互斥")
+    parser.add_argument("--check", type=Path,
+                        help="校验已有 .md 文件（运行 validate_session_output 并打印问题），不调用 LLM")
     parser.add_argument("-o", "--output", type=Path, help="输出 .md 路径（默认与包同名）")
     parser.add_argument("--prompt-only", action="store_true",
                         help="只生成可粘贴的会话提示词，不调用 LLM")
@@ -358,6 +541,12 @@ def main() -> None:
     parser.add_argument("--llm-model",
                         help="覆盖提供方默认模型；可用逗号分隔指定多个候选（如 qwen3.7-plus,gpt-5.2）")
     args = parser.parse_args()
+
+    if args.check is not None:
+        _run_check(args.check)
+        return
+    if args.package is None:
+        parser.error("必须提供 package（会话输入包）或 --check（校验已有 .md）")
 
     if not args.package.exists():
         print(f"错误：找不到会话输入包 {args.package}", file=sys.stderr)
@@ -369,9 +558,9 @@ def main() -> None:
         return
 
     llm_config = get_llm_config(args.llm_provider, args.llm_model)
-    if not llm_config.api_key:
+    if not llm_configured():
         print(
-            "未检测到 LLM API Key（LLM_API_KEY / LLM_BASE_URL 未设置）。\n"
+            "未同时检测到 LLM_API_KEY 与 LLM_BASE_URL。\n"
             "可用 --prompt-only 生成固定提示词，粘贴到任一 AI 会话完成校订。",
             file=sys.stderr,
         )

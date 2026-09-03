@@ -29,3 +29,7 @@ class Transcriber(ABC):
     def shutdown(self) -> None:
         """释放本转写器持有的长期资源（如并行转写进程池）。默认无操作。"""
         return None
+
+    def can_force_num_speakers(self, duration_sec: float | None) -> bool:
+        """Whether this backend can honor forced-K clustering at the given duration."""
+        return False

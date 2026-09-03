@@ -71,6 +71,21 @@ class TestBuildTranscript:
         assert "[SPEAKER_00]" not in body
         assert "[SPEAKER_01] 正文" in body
 
+    def test_merges_same_person_across_speaker_clusters(self):
+        """同一人被 diarization 切成多个簇时，映射后须并成一段。"""
+        segs = [
+            ("SPEAKER_01", "我以前出国玩，都要依靠朋友。"),
+            ("SPEAKER_01", "口语没有那么流利。"),
+            ("SPEAKER_03", "但是我觉得不能再这样纵容自己了。"),
+            ("SPEAKER_02", "那性价比很低啊。"),
+        ]
+        body = build_transcript(
+            segs,
+            {"SPEAKER_01": "湫湫", "SPEAKER_02": "小朱", "SPEAKER_03": "湫湫"},
+        )
+        assert body.count("【湫湫】") == 1
+        assert "【湫湫】我以前出国玩，都要依靠朋友。口语没有那么流利。但是我觉得不能再这样纵容自己了。" in body
+
     def test_speaker_map_renames_labels(self):
         body = build_transcript([("SPEAKER_00", "你好")], {"SPEAKER_00": "主播"})
         assert "【主播】你好" in body
@@ -85,6 +100,7 @@ class TestBuildMarkdown:
     def test_v5_shape(self):
         md = build_markdown("标题", "> 来源：播客 | 标题 | 2026-01-01", "简介", "正文")
         assert md.startswith("# 标题\n")
+        assert "## Show Notes" in md
         assert "## 全文转录" in md
         assert "正文" in md
         assert md.endswith("\n")

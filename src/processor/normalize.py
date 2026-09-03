@@ -1,7 +1,7 @@
 """Text normalization helpers for transcript post-processing.
 
 These enforce project house-style rules that should apply regardless of whether
-the LLM post-processing step is used (e.g. when running with --no-llm and doing
+the LLM post-processing step is used (e.g. when running with --llm-mode session and doing
 manual in-session editing).
 """
 

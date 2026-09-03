@@ -64,8 +64,9 @@ class TestBuildDraft:
         draft = build_draft(diarized, {})
         assert draft.startswith("# 例话：AI 协作实践\n")
         for heading in ("## 摘要", "## 核心观点",
-                        "## 问题与思考", "## 关键词", "## 人物简介"):
+                        "## 问题与思考", "## 术语表", "## 人物简介"):
             assert heading in draft and PLACEHOLDER_MARK in draft
+        assert "1. **待校订问题？**\n\n   待提炼" in draft
         assert "## 全文转录" in draft
         assert "[SPEAKER_00] 大家好，欢迎收听。" in draft
 

@@ -17,14 +17,14 @@
 - 千问或 DeepSeek 分块校订：错字修正、口语清理、语义分段、专名纠错（分块并行校订）
 - LLM 模型自动回退：按 `--llm-model` 候选列表（逗号分隔）或网关 `/models` 自动选可用模型，404 `model_not_found` 不再白白重试，过载（429/502/503）指数退避
 - 会话内校订固化：`python -m src.processor.session_edit <episode>_diarized.txt` 输出固定规范提示词，附带结构校验器保证输出格式稳定
-- 独立生成摘要、核心观点、问题与思考、关键词等阅读辅助信息，避免长文输出截断
+- 独立生成摘要、核心观点、问题与思考、术语表等阅读辅助信息，避免长文输出截断
 - 永久保留原始转录，整段音频缓存支持失败后续跑
 - 按模型、来源 hash 和提示词版本隔离缓存，避免失败重跑或改提示词后重复消耗 LLM token
 - 本地 ASR 纯 CPU 运行，无需 GPU
 - 结果缓存：同链接 + 同日期的重复运行直接复用已完成文稿，`--refresh` 强制重跑
-- 支持两种后处理方式：有 API Key 走自动化校订，无 Key 走 `--no-llm` 会话内处理
+- 支持两种后处理方式：API 链路（`--llm-mode api`）走自动化校订，会话链路（`--llm-mode session`）在会话内处理
 - 记录转写耗时、实时系数和 LLM token 用量
-- 输出结构化 Markdown：Show Notes → 摘要 → 核心观点 → 问题与思考 → 关键词 → 人物简介 → 全文转录
+- 输出结构化 Markdown：Show Notes → 摘要 → 核心观点 → 问题与思考 → 术语表 → 人物简介 → 全文转录
 
 ## 完整链路
 
@@ -37,19 +37,19 @@
 ② 本地转写：FunASR SenseVoice-Small 本地转写，保留原始逐字稿
 ③ 说话人区分：为不同声音添加标签
 ④ LLM 分块校订：分块修正错字、口语、专名、分段（会话内链路产出输入包，API 链路自动校订，含重试／回退）
-⑤ 内容提炼：生成摘要、核心观点、问题与思考、关键词等阅读辅助信息
+⑤ 内容提炼：生成摘要、核心观点、问题与思考、术语表等阅读辅助信息
 ⑥ Markdown 组装：按固定结构写入
 
 输出：结构化 Markdown 文稿（固定结构）
-Show Notes → 摘要 → 核心观点 → 问题与思考 → 关键词 → 人物简介 → 全文转录
+Show Notes → 摘要 → 核心观点 → 问题与思考 → 术语表 → 人物简介 → 全文转录
 ```
 
 ## 两种后处理链路
 
 校订与结构化可以走自动化 API，也可以交给 AI 会话——后者在 API Key 无余额或想保持完全本地时非常实用。两条链路共用同一份转写与说话人区分结果，只在"后处理"这一步分叉。
 
-- **会话内（默认，免费）**：工具只完成转写与说话人区分，产出"会话输入包"——一份自包含文件，包含节目标题、来源、Show Notes 与带 `[SPEAKER_XX]` 标签的全文。内部处理方式已固化为固定规范（`src/processor/session_edit.py`，v11），规范提示词要求产出与自动化链路相同的完整结构——摘要、核心观点、问题与思考、关键词、人物简介与全文转录——并用内置校验器复核会话产出（含「全文转录 ≥ 原始转录 50%」的信息量硬线）。未配置 API Key 时自动走此链路。
-- **自动化（可选）**：同时配置 `LLM_API_KEY` 与 `LLM_BASE_URL` 后直接运行，工具按块校订全文，再生成摘要、核心观点、问题与思考、关键词和人物简介（规则见 `src/processor/prompt.py`）。模型不可用时自动降级为会话内链路。
+- **会话内（默认，免费）**：工具只完成转写与说话人区分，产出"会话输入包"——一份自包含文件，包含节目标题、来源、Show Notes 与带 `[SPEAKER_XX]` 标签的全文。内部处理方式已固化为固定规范（`src/processor/session_edit.py`，v12），规范提示词要求产出与自动化链路相同的完整结构——摘要、核心观点、问题与思考、术语表、人物简介与全文转录——并用内置校验器复核会话产出（含「全文转录 ≥ 原始转录 50%」的信息量硬线）。未配置 API Key 时自动走此链路。
+- **自动化（可选）**：同时配置 `LLM_API_KEY` 与 `LLM_BASE_URL` 后直接运行，工具按块校订全文，再生成摘要、核心观点、问题与思考、术语表和人物简介（规则见 `src/processor/prompt.py`）。模型不可用时自动降级为会话内链路。
 
 ## 会话内校订：保真重建与校验
 
@@ -77,7 +77,7 @@ python -m src.processor.rebuild_transcript output/<节目>_diarized.txt -o outpu
 
 ```bash
 # Phase A：批量转写 + 说话人区分（多 URL 一次跑；内存紧张务必 --jobs 1 防 OOM）
-python -m src.main --no-llm <url1> <url2> ... --jobs 1
+python -m src.main --llm-mode session <url1> <url2> ... --jobs 1
 
 # Phase B：幂等续跑（扫描全部 _diarized → 生成缺失初稿、补齐来源行三要素、校验报告）
 python -m src.processor.finish_phase_b --all
@@ -93,7 +93,7 @@ python -m src.processor.finish_phase_b --speaker-preview
    python -m src.processor.rebuild_transcript <包> \
        --speaker-map "SPEAKER_00:主播xx,SPEAKER_01:嘉宾yy" -o <md> --replace-transcript
    ```
-2. **上层章节**：摘要/核心观点/问题与思考/关键词/人物简介需人工撰写（生成初稿中为「待校订」占位，脚本据此列出待办清单）。
+2. **上层章节**：摘要/核心观点/问题与思考/术语表/人物简介需人工撰写（生成初稿中为「待校订」占位，脚本据此列出待办清单）。
 
 **经验要点**：
 
@@ -124,8 +124,8 @@ FunASR 模型（SenseVoice-Small、Paraformer-Large、ct-punc 标点、fsmn-vad�
 | FunASR（SenseVoice-Small / Paraformer-Large） | 在本地把音频转成带时间信息的原始文字 | 不负责核心观点、人物判断和文稿结构 |
 | 说话人识别 | 根据声音特征区分说话人，生成 `SPEAKER_00` 等标签；VAD 段上限 4s 从源头降低快速接话的混段概率 | 只区分声音，不直接确认真实姓名和身份；混段自动保留 `[SPEAKER_XX]` 而非猜测归属 |
 | LLM 全文校订 | 分块修正错字、口语、专名和分段，保留原意 | 不重新创作或扩写播客观点 |
-| LLM 内容提炼 | 结合 Show Notes 和校订全文，生成摘要、核心观点、问题与思考、关键词，并在证据充分时映射说话人身份 | 信息不足时不猜测人物身份 |
-| Markdown 组装 | 按固定结构写入 Show Notes、摘要、核心观点、问题与思考、关键词、人物简介和全文 | 不参与语义判断 |
+| LLM 内容提炼 | 结合 Show Notes 和校订全文，生成摘要、核心观点、问题与思考、术语表，并在证据充分时映射说话人身份 | 信息不足时不猜测人物身份 |
+| Markdown 组装 | 按固定结构写入 Show Notes、摘要、核心观点、问题与思考、术语表、人物简介和全文 | 不参与语义判断 |
 
 ## 快速开始
 
@@ -133,7 +133,7 @@ FunASR 模型（SenseVoice-Small、Paraformer-Large、ct-punc 标点、fsmn-vad�
 # 安装依赖（依赖以 pyproject.toml 为准，requirements.txt 为兼容转发）
 pip install -r requirements.txt
 
-# 转录并产出会话输入包（默认免费链路，无需任何 API Key）
+# 转录并产出会话输入包（默认会话链路，无需任何 API Key）
 xiesheng https://www.xiaoyuzhoufm.com/episode/xxxxx
 # 把生成的 output/<节目名>_diarized.txt 粘贴到 AI 会话做校订与结构化
 
@@ -148,7 +148,7 @@ xiesheng https://www.xiaoyuzhoufm.com/episode/xxxxx --llm-provider deepseek
 # 指定多个候选模型，按顺序自动回退（需已配置 LLM API）
 xiesheng https://www.xiaoyuzhoufm.com/episode/xxxxx --llm-model qwen3.7-plus,gpt-5.2
 
-# 会话内校订：生成固定规范提示词（免费链路）
+# 会话内校订：生成固定规范提示词（会话链路 session）
 python -m src.processor.session_edit output/<节目名>_diarized.txt --prompt-only
 
 # 会话内校订：用已配置 LLM 自动完成并校验
@@ -176,7 +176,7 @@ xiesheng url1 url2 url3 ... --use-server http://127.0.0.1:8765
 
 ## 配置
 
-默认免费链路无需任何配置。可选自动化 LLM 后处理需要 OpenAI 兼容接口，从操作系统环境变量读取：
+默认会话链路（--llm-mode session）无需任何配置。可选 API 链路 LLM 后处理需要 OpenAI 兼容接口，从操作系统环境变量读取：
 
 ```env
 LLM_API_KEY=your_api_key
@@ -195,7 +195,7 @@ LLM_BASE_URL=https://your-provider/v1
 | `--llm-provider` | `qwen` | 后处理模型提供方（`qwen`/`deepseek`） |
 | `--llm-model` | 提供方默认值 | 覆盖默认模型名称；支持逗号分隔多个候选按顺序回退（如 `qwen3.7-plus,gpt-5.2`） |
 | `--speakers` | 自动检测 | 明确指定说话人数 |
-| `--no-llm` | 否 | 仅转写与说话人区分，产出会话输入包，不需要 LLM API Key |
+| `--llm-mode {api,session}` | 否 | LLM 执行方式：`api`=调 API Key 自动化校订，`session`=会话内由 agent 校订（默认自动检测：有 Key→api，无→session）；`--no-llm` 为弃用别名，等价于 `session` |
 | `--no-diarization` | 否 | 跳过说话人识别 |
 | `--spk-max-seg-ms` | `4000` | 说话人分离粒度：VAD 段上限（毫秒），段越短越不易把两人快速接话并成一段；可回退 `8000` |
 | `--batch-size-s` | `60` | FunASR VAD 批切段时长（秒）：越大单次送入越长、调用次数越少但峰值内存越高；内存紧张默认保守，可在 90/120 间 A/B 验证后上调 |
@@ -219,15 +219,17 @@ LLM_BASE_URL=https://your-provider/v1
 （2-3 句话总结本期主题与核心内容，不列要点）
 
 ## 核心观点
-- **观点名称**：支撑证据（若有值得单独收录的原话，于下行用 > 引用块附上，无则不加）
+- **观点名称**：支撑证据（若有值得单独收录的原话，直接跟在句后、用直角引号「」包裹，不单独成引用块）
+  - **观点内特有术语**：1-2 句就近解释（如「第一性原理」「第二曲线」这类概念，解释直接挂在该观点下）
 （不限条数，提炼全部重要观点）
 
 ## 问题与思考
 - **① 核心问题（整理式，非原文照抄）？** 思考或回答（1-3 句）
 （3-5 个核心追问，与核心观点互补不重复）
 
-## 关键词
-- **关键词**：1-2 句说明
+## 术语表
+- **残留术语**：1-2 句说明
+（只放无法归入任一核心观点的残留术语，0-4 个、无则留空；排除播客名/节目名/嘉宾名/平台名等专名）
 
 ## 人物简介
 **身份姓名**：简介
@@ -240,7 +242,7 @@ LLM_BASE_URL=https://your-provider/v1
 ## 成本
 
 - 转写与说话人区分：本地免费
-- 会话内处理：免费（在 AI 会话中完成）
+- 会话内链路（session）：免费（LLM 校订在 AI 会话内由 agent 完成，不消耗 API 额度）
 - 可选自动化 LLM 后处理费用取决于模型、节目长度和所选 API 提供方账单
 - 个人使用 DeepSeek 校订的历史实测中，典型单期 API 支出低于 0.05 元
 - 程序记录输入／输出 token，不再使用过期的固定单价估算
@@ -250,7 +252,7 @@ LLM_BASE_URL=https://your-provider/v1
 ## 中间文件
 
 - `output/<节目名>_raw.txt`：未经 LLM 修改的原始转录
-- `output/<节目名>_diarized.txt`：自包含会话输入包（标题、来源、Show Notes + 带 `[SPEAKER_XX]` 标签的全文），`--no-llm` 时的直接交付物
+- `output/<节目名>_diarized.txt`：自包含会话输入包（标题、来源、Show Notes + 带 `[SPEAKER_XX]` 标签的全文），会话链路（--llm-mode session）的直接交付物
 - `output/<节目名>.wav`：转写用的 16k mono WAV（按节目命名，避免多期互相覆盖）
 - `output/.work/<节目名>/transcribe/`：按音频指纹与模型名持久化的整段转写缓存，支持失败后续跑
 - `output/.work/<节目名>/`：按模型与提示词版本隔离的校订分块缓存、`struct.json` 结构化结果缓存

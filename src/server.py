@@ -14,7 +14,8 @@ HTTP 接口：
     GET  /health       -> {"status":"ok","model":...}
     POST /transcribe   -> body {"audio": "/path/to.wav",
                                 "duration_sec": <float|None>,
-                                "work_dir": "/path/to/.work/<ep>"}
+                                "work_dir": "/path/to/.work/<ep>",
+                                "model_name": "sensevoice-small"}
                           返回 {"raw_text", "segments", "duration_sec", "cost_yuan"}
 
 转写期间的进度照常写入 work_dir/status.json（与本地转写同路径），可跨会话监控。
@@ -40,15 +41,35 @@ DEFAULT_PORT = 8765
 _TRANSCRIBE_LOCK = threading.Lock()
 
 
+class ModelMismatchError(RuntimeError):
+    """The client requested a different loaded model."""
+
+
+def validate_model_name(requested: object, loaded: object) -> None:
+    if not isinstance(requested, str) or not requested:
+        raise ValueError("model_name is required")
+    if requested != loaded:
+        raise ModelMismatchError(
+            f"model mismatch: requested {requested}, loaded {loaded}"
+        )
+
+
 class HttpTranscriber(Transcriber):
     """本地转写器的 HTTP 客户端代理：签名与 FunASRTranscriber 一致，调用常驻服务。"""
 
-    def __init__(self, base_url: str = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}", model_name: str = "sensevoice-small", timeout: int = 7200):
+    def __init__(
+        self,
+        base_url: str = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}",
+        model_name: str = "sensevoice-small",
+        timeout: int = 7200,
+    ):
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
         self.timeout = timeout
 
-    def transcribe(self, audio_path, duration_sec=None, *, work_dir=None, jobs=1, num_speakers=None) -> TranscriptResult:
+    def transcribe(
+        self, audio_path, duration_sec=None, *, work_dir=None, jobs=1, num_speakers=None
+    ) -> TranscriptResult:
         import requests
 
         payload = {
@@ -56,6 +77,7 @@ class HttpTranscriber(Transcriber):
             "duration_sec": duration_sec,
             "work_dir": str(work_dir) if work_dir else None,
             "num_speakers": num_speakers,
+            "model_name": self.model_name,
         }
         resp = requests.post(f"{self.base_url}/transcribe", json=payload, timeout=self.timeout)
         if resp.status_code != 200:
@@ -74,6 +96,18 @@ class HttpTranscriber(Transcriber):
         resp = requests.get(f"{self.base_url}/health", timeout=10)
         resp.raise_for_status()
         return resp.json()
+
+    def ensure_model(self) -> dict:
+        health = self.health()
+        if health.get("status") != "ok":
+            raise RuntimeError(f"transcription server is not ready: {health}")
+        validate_model_name(health.get("model"), self.model_name)
+        return health
+
+    def can_force_num_speakers(self, duration_sec: float | None) -> bool:
+        from src.transcriber.funasr_transcriber import CHUNK_MARGIN, CHUNK_SEC
+
+        return bool(duration_sec and duration_sec > CHUNK_SEC * CHUNK_MARGIN)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -98,6 +132,15 @@ class _Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
         except Exception as exc:
             self._json(400, {"error": f"bad request: {exc}"})
+            return
+
+        try:
+            validate_model_name(payload.get("model_name"), self.transcriber.model_name)
+        except ModelMismatchError as exc:
+            self._json(409, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
             return
 
         audio = payload.get("audio")

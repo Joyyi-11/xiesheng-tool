@@ -10,7 +10,7 @@ Phase B 的断点恢复不能依赖「主对话跨轮次唤醒」，而要依赖
     # 只读扫描：报告每期状态（缺 md / 校验问题 / 残留标签 / 待校订章节）
     python -m src.processor.finish_phase_b
 
-    # 生成缺失的 .md 初稿（v6 结构占位 + 保真全文转录，保留 [SPEAKER_XX] 待映射）
+    # 生成缺失的 .md 初稿（当前结构占位 + 保真全文转录，保留 [SPEAKER_XX] 待映射）
     python -m src.processor.finish_phase_b --gen-missing
 
     # 自动补齐来源行三要素（播客 | 节目标题 | 日期，节目标题取自 # 标题）
@@ -30,7 +30,7 @@ Phase B 的断点恢复不能依赖「主对话跨轮次唤醒」，而要依赖
 - 幂等：重复运行结果一致；除 --fix-source 外不修改已有 .md；--fix-source 只改来源行。
 - 不自动猜说话人：残留 [SPEAKER_XX] 一律列进报告，由人工按内容归并后用
   rebuild_transcript --replace-transcript --speaker-map 替换全文转录。
-- 上层章节（摘要/核心观点/问题与思考/关键词/人物简介）必须人工撰写，
+- 上层章节（摘要/核心观点/问题与思考/术语表/人物简介）必须人工撰写，
   初稿中以「（待校订）」占位，脚本据此列出待办清单。
 """
 
@@ -41,18 +41,22 @@ import sys
 from pathlib import Path
 
 from src.processor.rebuild_transcript import (
-    build_markdown,
     build_transcript,
     parse_package,
     parse_speaker_map,
 )
 from src.processor.session_edit import _split_sections, validate_session_output
+from src.utils import SPEAKER_LABEL_RE, SPEAKER_LINE_RE
 
 PLACEHOLDER_SECTIONS = {
     "## 摘要": "（待校订：2-3 句总结本期主题与核心结论，不列要点）",
-    "## 核心观点": "- **待校订。** 待提炼本期重要观点（每条以加粗主题句开头、句号结尾；若有值得单独收录的原话可于下行用 > 引用块附上，无则不加）",
-    "## 问题与思考": "- **① 待校订？** 待提炼 3-5 个节目真正讨论的核心问题与张力",
-    "## 关键词": "- **待校订**：待提取 4-8 个贯穿节目的核心概念",
+    "## 核心观点": (
+        "- **待校订。** 待提炼本期重要观点（每条以加粗主题句开头、句号结尾；"
+        "若有值得单独收录的原话可于句后用直角引号「」附上，无则不加；"
+        "观点内特有术语用缩进子条目就近解释）"
+    ),
+    "## 问题与思考": "1. **待校订问题？**\n\n   待提炼 3-5 个节目真正讨论的核心问题，并直接给出解答（非反抛新问号；引用人物须点明身份；问题整句加粗、序号在加粗外）",
+    "## 术语表": "- **待校订**：待提取无法归入核心观点的残留术语（无则留空；排除播客名/节目名/嘉宾名/平台名等专名）",
     "## 人物简介": "**待校订**：（填写主播/嘉宾身份与姓名，一行一位，正文格式）",
 }
 PLACEHOLDER_MARK = "待校订"
@@ -86,7 +90,7 @@ def source_line_fix(md_text: str, title: str) -> str:
 
 
 def build_draft(diarized: Path, speaker_map: dict[str, str]) -> str:
-    """生成 v6 结构初稿：标题/来源/Show Notes/上层章节占位/全文转录。"""
+    """生成当前结构初稿：标题/来源/Show Notes/上层章节占位/全文转录。"""
     package_text = diarized.read_text(encoding="utf-8")
     title, source_line, show_notes, _, segs = parse_package(package_text)
     if not source_line:
@@ -138,7 +142,7 @@ def analyze_one(diarized: Path, md_path: Path, fix_source: bool) -> dict:
     # 精确取「## 全文转录」段统计残留标签（避免把「## 校订说明」等后续章节的引用算进去）
     trans_section = _split_sections(md).get("## 全文转录", "")
     result["ratio"] = len(trans_section) / max(len(src_text), 1) if src_text else 0
-    result["labels"] = len(re.findall(r"\[SPEAKER_\d+\]", trans_section))
+    result["labels"] = len(SPEAKER_LABEL_RE.findall(trans_section))
     for heading in PLACEHOLDER_SECTIONS:
         if PLACEHOLDER_MARK in (md.split(heading, 1)[1].split("\n## ", 1)[0] if heading in md else ""):
             result["placeholders"].append(heading)
@@ -151,29 +155,35 @@ def print_speaker_preview(directory: Path) -> None:
 
     for diarized in find_diarized(directory):
         text = diarized.read_text(encoding="utf-8")
-        segs = re.findall(r"^\[(SPEAKER_\d+)\]\s*(.*)$", text, re.M)
-        cnt: Counter[str] = Counter(l for l, _ in segs)
+        segs = SPEAKER_LINE_RE.findall(text)
+        cnt: Counter[str] = Counter(label for label, _ in segs)
         chars: dict[str, int] = defaultdict(int)
         first: dict[str, str] = {}
-        for l, t in segs:
-            t2 = t.strip()
-            chars[l] += len(t2)
-            if t2 and l not in first:
-                first[l] = t2
+        for label, text_value in segs:
+            t2 = text_value.strip()
+            chars[label] += len(t2)
+            if t2 and label not in first:
+                first[label] = t2
         print(f"=== {diarized.name}（{len(segs)} 段 / {len(cnt)} 个标签）===")
-        for l in sorted(cnt):
-            sample = first.get(l, "")
-            print(f"  {l}  segs={cnt[l]}  chars={chars[l]}  |  {sample[:90]}")
+        for label in sorted(cnt):
+            sample = first.get(label, "")
+            print(f"  {label}  segs={cnt[label]}  chars={chars[label]}  |  {sample[:90]}")
         print()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase B 幂等续跑：扫描、生成缺失初稿、补齐来源行、校验")
     parser.add_argument("--dir", type=Path, default=Path("output"), help="扫描目录（默认 output/）")
-    parser.add_argument("--gen-missing", action="store_true", help="为缺 .md 的会话包生成 v6 初稿")
+    parser.add_argument("--gen-missing", action="store_true", help="为缺 .md 的会话包生成当前结构初稿")
     parser.add_argument("--fix-source", action="store_true", help="自动补齐来源行三要素")
-    parser.add_argument("--speaker-map-file", type=Path, default=None, help="JSON: {diarized文件名: 'SPEAKER_00:名字,...'}")
-    parser.add_argument("--speaker-preview", action="store_true", help="打印每个会话包的说话人画像（段数/字符数/首段样本），辅助映射判定，只读")
+    parser.add_argument(
+        "--speaker-map-file", type=Path, default=None,
+        help="JSON: {diarized文件名: 'SPEAKER_00:名字,...'}",
+    )
+    parser.add_argument(
+        "--speaker-preview", action="store_true",
+        help="打印每个会话包的说话人画像（段数/字符数/首段样本），辅助映射判定，只读",
+    )
     parser.add_argument("--all", action="store_true", help="等价 --gen-missing --fix-source")
     args = parser.parse_args()
 
@@ -227,7 +237,8 @@ def main() -> None:
             pending += 1
         else:
             problem += 1
-        print(f"{status:<6} {title[:40]:<40} {r['ratio']:>4.0%} {r['labels']:>6}  {'; '.join(notes) if notes else 'OK'}")
+        note = "; ".join(notes) if notes else "OK"
+        print(f"{status:<6} {title[:40]:<40} {r['ratio']:>4.0%} {r['labels']:>6}  {note}")
     print("-" * 100)
     print(f"已完成 {done} | 待校订/待映射 {pending} | 校验问题 {problem}")
 

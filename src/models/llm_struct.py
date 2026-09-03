@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 MAX_KEY_POINTS = 20
 MAX_QUOTES = 20
-MAX_KEYWORDS = 10
+MAX_KEYWORDS_SAFETY_CAP = 10  # 防失控上限，非产品规范（v12 术语表规范 0-4 个）
 MAX_QUESTIONS = 5
 
 
@@ -20,30 +20,14 @@ def _clean_str(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
 
-def _normalize_seconds(value: Any) -> float | None:
-    """Best-effort parse of a timeline start into seconds."""
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return max(0.0, float(value))
-    if isinstance(value, str):
-        text = value.strip()
-        try:
-            return max(0.0, float(text))
-        except ValueError:
-            pass
-        # optional h:mm:ss / mm:ss
-        parts = text.split(":")
-        if 2 <= len(parts) <= 3:
-            try:
-                nums = [int(x) for x in parts]
-                if len(nums) == 3:
-                    return float(nums[0] * 3600 + nums[1] * 60 + nums[2])
-                return float(nums[0] * 60 + nums[1])
-            except ValueError:
-                return None
-        return None
-    return None
+class TermDefOut(BaseModel):
+    model_config = {"str_strip_whitespace": True}
+    term: str = ""
+    desc: str = ""
+
+    @property
+    def valid(self) -> bool:
+        return bool(self.term)
 
 
 class KeyPointOut(BaseModel):
@@ -51,6 +35,7 @@ class KeyPointOut(BaseModel):
     point: str = ""
     evidence: str = ""
     quote: str = ""
+    terms: list[TermDefOut] = Field(default_factory=list)
 
     @property
     def valid(self) -> bool:
@@ -75,10 +60,6 @@ class QuestionItemOut(BaseModel):
     @property
     def valid(self) -> bool:
         return bool(self.question)
-
-
-class SpeakerMappingOut(BaseModel):
-    model_config = {"extra": "allow", "str_strip_whitespace": True}
 
 
 class StructOut(BaseModel):
@@ -124,7 +105,7 @@ def parse_struct(raw: dict[str, Any] | None) -> StructOut:
                         out.append(kw)
                 except Exception:
                     continue
-        return out[:MAX_KEYWORDS]
+        return out[:MAX_KEYWORDS_SAFETY_CAP]
 
     def questions() -> list[QuestionItemOut]:
         out: list[QuestionItemOut] = []
@@ -154,7 +135,14 @@ def struct_to_doc(struct: StructOut) -> dict[str, Any]:
     """Convert a validated StructOut to the plain-dict form used by build doc."""
     return {
         "key_points": [
-            {"point": k.point, "evidence": k.evidence, "quote": _clean_str(k.quote)}
+            {
+                "point": k.point,
+                "evidence": k.evidence,
+                "quote": _clean_str(k.quote),
+                "terms": [
+                    {"term": t.term, "desc": t.desc} for t in k.terms if t.valid
+                ],
+            }
             for k in struct.key_points if k.valid
         ],
         "speaker_intro": _clean_str(struct.speaker_intro),
