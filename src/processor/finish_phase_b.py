@@ -10,7 +10,7 @@ Phase B 的断点恢复不能依赖「主对话跨轮次唤醒」，而要依赖
     # 只读扫描：报告每期状态（缺 md / 校验问题 / 残留标签 / 待校订章节）
     python -m src.processor.finish_phase_b
 
-    # 生成缺失的 .md 初稿（当前结构占位 + 保真全文转录，保留 [SPEAKER_XX] 待映射）
+    # 生成缺失的 .md 初稿（当前结构占位 + 保真原文转录，保留 [SPEAKER_XX] 待映射）
     python -m src.processor.finish_phase_b --gen-missing
 
     # 自动补齐来源行三要素（播客 | 节目标题 | 日期，节目标题取自 # 标题）
@@ -29,7 +29,7 @@ Phase B 的断点恢复不能依赖「主对话跨轮次唤醒」，而要依赖
 说明：
 - 幂等：重复运行结果一致；除 --fix-source 外不修改已有 .md；--fix-source 只改来源行。
 - 不自动猜说话人：残留 [SPEAKER_XX] 一律列进报告，由人工按内容归并后用
-  rebuild_transcript --replace-transcript --speaker-map 替换全文转录。
+  rebuild_transcript --replace-transcript --speaker-map 替换原文转录。
 - 上层章节（摘要/核心观点/问题与思考/术语表/人物简介）必须人工撰写，
   初稿中以「（待校订）」占位，脚本据此列出待办清单。
 """
@@ -46,7 +46,12 @@ from src.processor.rebuild_transcript import (
     parse_speaker_map,
 )
 from src.processor.session_edit import _split_sections, validate_session_output
-from src.utils import SPEAKER_LABEL_RE, SPEAKER_LINE_RE
+from src.utils import (
+    SPEAKER_LABEL_RE,
+    SPEAKER_LINE_RE,
+    TRANSCRIPT_HEADING,
+    get_transcript_body,
+)
 
 PLACEHOLDER_SECTIONS = {
     "## 摘要": "（待校订：2-3 句总结本期主题与核心结论，不列要点）",
@@ -90,7 +95,7 @@ def source_line_fix(md_text: str, title: str) -> str:
 
 
 def build_draft(diarized: Path, speaker_map: dict[str, str]) -> str:
-    """生成当前结构初稿：标题/来源/Show Notes/上层章节占位/全文转录。"""
+    """生成当前结构初稿：标题/来源/Show Notes/上层章节占位/原文转录。"""
     package_text = diarized.read_text(encoding="utf-8")
     title, source_line, show_notes, _, segs = parse_package(package_text)
     if not source_line:
@@ -107,7 +112,7 @@ def build_draft(diarized: Path, speaker_map: dict[str, str]) -> str:
     ]
     for heading, placeholder in PLACEHOLDER_SECTIONS.items():
         parts += ["", heading, "", placeholder]
-    parts += ["", "## 全文转录", "", body]
+    parts += ["", TRANSCRIPT_HEADING, "", body]
     return "\n".join(parts) + "\n"
 
 
@@ -139,8 +144,8 @@ def analyze_one(diarized: Path, md_path: Path, fix_source: bool) -> dict:
             result["source_fixed"] = True
 
     result["probs"] = validate_session_output(md, src_text)
-    # 精确取「## 全文转录」段统计残留标签（避免把「## 校订说明」等后续章节的引用算进去）
-    trans_section = _split_sections(md).get("## 全文转录", "")
+    # 精确取转录段统计残留标签（避免把「## 校订说明」等后续章节的引用算进去）
+    trans_section = get_transcript_body(_split_sections(md))
     result["ratio"] = len(trans_section) / max(len(src_text), 1) if src_text else 0
     result["labels"] = len(SPEAKER_LABEL_RE.findall(trans_section))
     for heading in PLACEHOLDER_SECTIONS:

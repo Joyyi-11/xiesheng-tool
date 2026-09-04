@@ -67,7 +67,7 @@ class TestBuildDraft:
                         "## 问题与思考", "## 术语表", "## 人物简介"):
             assert heading in draft and PLACEHOLDER_MARK in draft
         assert "1. **待校订问题？**\n\n   待提炼" in draft
-        assert "## 全文转录" in draft
+        assert "## 原文转录" in draft
         assert "[SPEAKER_00] 大家好，欢迎收听。" in draft
 
     def test_repeat_run_identical(self, tmp_path):
@@ -96,7 +96,7 @@ class TestAnalyzeOne:
         diarized = tmp_path / "节目_diarized.txt"
         diarized.write_text(SAMPLE_PACKAGE, encoding="utf-8")
         md = md_path_for(diarized)
-        md.write_text("# 标题\n\n## 全文转录\n\n[SPEAKER_00] 残留\n", encoding="utf-8")
+        md.write_text("# 标题\n\n## 原文转录\n\n[SPEAKER_00] 残留\n", encoding="utf-8")
         r = analyze_one(diarized, md, fix_source=False)
         assert r["labels"] == 1
 
@@ -105,7 +105,7 @@ class TestAnalyzeOne:
         diarized.write_text(SAMPLE_PACKAGE, encoding="utf-8")
         md = md_path_for(diarized)
         md.write_text(
-            "# 标题\n\n## 摘要\n\n（待校订：占位）\n\n## 全文转录\n\n内容\n",
+            "# 标题\n\n## 摘要\n\n（待校订：占位）\n\n## 原文转录\n\n内容\n",
             encoding="utf-8",
         )
         r = analyze_one(diarized, md, fix_source=False)
@@ -115,7 +115,7 @@ class TestAnalyzeOne:
         diarized = tmp_path / "节目_diarized.txt"
         diarized.write_text(SAMPLE_PACKAGE, encoding="utf-8")
         md = md_path_for(diarized)
-        md.write_text("# 标题\n\n> 来源：播客 | 2026-01-01\n\n## 全文转录\n\n内容\n",
+        md.write_text("# 标题\n\n> 来源：播客 | 2026-01-01\n\n## 原文转录\n\n内容\n",
                       encoding="utf-8")
         r = analyze_one(diarized, md, fix_source=True)
         assert r.get("source_fixed") is True

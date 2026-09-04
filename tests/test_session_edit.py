@@ -7,6 +7,7 @@ from src.processor.session_edit import (
     build_session_prompt,
     validate_session_output,
 )
+from src.utils import TRANSCRIPT_HEADING
 
 GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚马逊AGI查晟
 
@@ -49,7 +50,7 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 **主播**：大卫翁，播客主理人
 **嘉宾**：查晟，亚马逊 AGI 优化与研究团队负责人
 
-## 全文转录
+## 原文转录
 
 【主播】大家好，欢迎来到我的博客节目。
 
@@ -58,7 +59,7 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 
 
 def test_session_rules_are_versioned():
-    assert SESSION_SPEC_VERSION == 18
+    assert SESSION_SPEC_VERSION == 19
 
 
 def test_build_session_prompt_wraps_package():
@@ -71,7 +72,7 @@ def test_build_session_prompt_wraps_package():
     assert "## 问题与思考" in prompt
     assert "## 术语表" in prompt
     assert "## 人物简介" in prompt
-    assert "## 全文转录" in prompt
+    assert "## 原文转录" in prompt
     assert package in prompt  # 输入包原样嵌入
 
 
@@ -243,7 +244,7 @@ def test_strip_unwanted_sections_removes_outline_and_mermaid():
     md = (
         GOLDEN
         + "\n## 大纲\n\n- 要点\n\n```mermaid\nmindmap\n  root\n```\n\n"
-        + "## 全文转录\n\n【主播】x。\n"
+        + "## 原文转录\n\n【主播】x。\n"
     )
     cleaned = _strip_unwanted_sections(md)
     assert "## 大纲" not in cleaned
@@ -278,7 +279,7 @@ def test_validate_flags_speaker_imbalance():
         "## 问题与思考\n\n1. 找不到工作是谁的问题？\n\n   策略错位。\n\n"
         "## 术语表\n\n- **术语**：解释。\n\n"
         "## 人物简介\n\n**主播**：湫湫\n\n"
-        "## 全文转录\n\n"
+        "## 原文转录\n\n"
         + "\n\n".join(f"【嘉宾吱吱】第{i}句内容。" for i in range(9))
         + "\n\n【主播湫湫】最后一句话。"
     )
@@ -295,7 +296,7 @@ def test_validate_flags_unmerged_same_speaker_runs():
         "## 问题与思考\n\n1. 要不要逼自己学 AI？\n\n   先判断成本。\n\n"
         "## 术语表\n\n- **术语**：解释。\n\n"
         "## 人物简介\n\n**主播**：湫湫\n\n"
-        "## 全文转录\n\n"
+        "## 原文转录\n\n"
         + "\n\n".join(f"【湫湫】第{i}句。" for i in range(4))
         + "\n\n【小朱】插一句。"
     )
@@ -313,6 +314,19 @@ def test_session_rules_warn_mid_phrase_period():
     assert "好不好找工作" in SESSION_RULES
 
 
+def test_validate_accepts_legacy_transcript_heading():
+    # 更名前产出的旧稿（## 全文转录）不得因改名被判「缺少必需小节」
+    legacy = GOLDEN.replace(TRANSCRIPT_HEADING, "## 全文转录")
+    assert validate_session_output(legacy) == []
+
+
+def test_transcript_heading_is_single_source():
+    # 标题名由 utils 常量统一定义，各链路不得各自硬编码
+    assert TRANSCRIPT_HEADING == "## 原文转录"
+    assert TRANSCRIPT_HEADING in REQUIRED_HEADINGS
+    assert TRANSCRIPT_HEADING in SESSION_RULES
+
+
 def test_required_headings_are_exported():
     assert REQUIRED_HEADINGS == (
         "## Show Notes",
@@ -321,5 +335,5 @@ def test_required_headings_are_exported():
         "## 问题与思考",
         "## 术语表",
         "## 人物简介",
-        "## 全文转录",
+        "## 原文转录",
     )

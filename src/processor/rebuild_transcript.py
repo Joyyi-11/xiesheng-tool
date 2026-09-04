@@ -1,15 +1,16 @@
-"""保真重建会话内校订的全文转录（防「过度删减」返工）。
+"""保真重建会话内校订的原文转录（防「过度删减」返工）。
 
 会话内校订（会话链路 / --llm-mode session）最常见的问题：AI 校订时把口语长叙述压缩成概要，
-导致 ``validate_session_output`` 报「全文转录长度仅为原始转录的 <50%（疑似
-过度删减）」。本工具从 ``<节目>_diarized.txt`` 会话包**保真重建**全文转录：
+导致 ``validate_session_output`` 报「原文转录长度仅为原始转录的 <50%（疑似
+过度删减）」。本工具从 ``<节目>_diarized.txt`` 会话包**保真重建**原文转录：
 
 * 100% 保留原始转录内容（不改写、不缩写、不省略）；
 * 每个 ``[SPEAKER_XX]`` 段按序保留，合并同标签连续段；
 * 可选的 ``--speaker-map`` 把标签映射为真实身份（不提供则保留原标签，
   留给校订阶段按语义处理）；
 * 输出初稿 ``.md``（标题/来源/Show Notes 取自会话包）或仅替换既有 ``.md``
-  的 ``## 全文转录`` 段（前面已校订好的章节原样保留）。
+  的 ``## 原文转录`` 段（前面已校订好的章节原样保留；旧标题 ``## 全文转录``
+  同样可识别，替换后统一写回新标题）。
 
 用法::
 
@@ -20,7 +21,7 @@
     python -m src.processor.rebuild_transcript output/<节目>_diarized.txt \\
         --speaker-map "SPEAKER_00:主播 Jean,SPEAKER_01:嘉宾姨姨" -o output/<节目>.md
 
-    # 只替换既有 .md 的全文转录段（保留已校订的摘要/核心观点等章节）
+    # 只替换既有 .md 的原文转录段（保留已校订的摘要/核心观点等章节）
     python -m src.processor.rebuild_transcript output/<节目>_diarized.txt -o output/<节目>.md --replace-transcript
 
 说明：本工具只做保真重建，不做 ASR 纠错（错字、专名、填充词删除仍由校订阶段
@@ -34,7 +35,11 @@ import re
 import sys
 from pathlib import Path
 
-from src.utils import SPEAKER_LINE_RE
+from src.utils import (
+    LEGACY_TRANSCRIPT_HEADING,
+    SPEAKER_LINE_RE,
+    TRANSCRIPT_HEADING,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +122,7 @@ def build_markdown(
     show_notes: str,
     transcript_body: str,
 ) -> str:
-    """Assemble a minimal draft .md (title/source/Show Notes/全文转录)."""
+    """Assemble a minimal draft .md (title/source/Show Notes/原文转录)."""
     lines = [
         f"# {title}",
         "",
@@ -127,7 +132,7 @@ def build_markdown(
         "",
         show_notes or "（无）",
         "",
-        "## 全文转录",
+        TRANSCRIPT_HEADING,
         "",
         transcript_body,
     ]
@@ -135,11 +140,15 @@ def build_markdown(
 
 
 def replace_transcript_section(md: str, transcript_body: str) -> str:
-    """Replace everything from ``## 全文转录`` onward in an existing .md."""
-    head, sep, _ = md.partition("## 全文转录")
-    if not sep:
-        raise ValueError("目标 .md 中未找到 ## 全文转录 小节，无法替换")
-    return head.rstrip() + "\n\n## 全文转录\n\n" + transcript_body + "\n"
+    """Replace everything from the transcript heading onward in an existing .md.
+
+    旧标题 ``## 全文转录`` 同样可识别（存量稿无需手工改名），写回时统一为新标题。
+    """
+    for heading in (TRANSCRIPT_HEADING, LEGACY_TRANSCRIPT_HEADING):
+        head, sep, _ = md.partition(heading)
+        if sep:
+            return head.rstrip() + f"\n\n{TRANSCRIPT_HEADING}\n\n" + transcript_body + "\n"
+    raise ValueError(f"目标 .md 中未找到 {TRANSCRIPT_HEADING} 小节，无法替换")
 
 
 def parse_speaker_map(text: str) -> dict[str, str]:
@@ -166,7 +175,7 @@ def parse_speaker_map(text: str) -> dict[str, str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="从会话包保真重建全文转录（防过度删减；输出初稿 .md）"
+        description="从会话包保真重建原文转录（防过度删减；输出初稿 .md）"
     )
     parser.add_argument("package", type=Path, help="会话输入包（<节目>_diarized.txt）")
     parser.add_argument(
@@ -180,7 +189,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--replace-transcript", action="store_true",
-        help="替换既有 .md 的 ## 全文转录 段（保留该文件前面已校订的章节）；"
+        help=f"替换既有 .md 的 {TRANSCRIPT_HEADING} 段（保留该文件前面已校订的章节）；"
              "未提供 --output 时无效",
     )
     args = parser.parse_args()

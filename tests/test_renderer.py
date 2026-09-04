@@ -42,6 +42,12 @@ class TestBuildOutputMarkdown:
         # 三段式：观点句、展开论述句、引用句顺次相接，不用冒号
         assert "**要点。** 证据。「这是一句原话。」" in md
 
+    def test_renders_transcript_heading_from_shared_constant(self):
+        # 小节标题由 src.utils.TRANSCRIPT_HEADING 统一定义，渲染器不得硬编码
+        md = build_output_markdown(_make_doc())
+        assert "## 原文转录" in md
+        assert md.rstrip().splitlines()[-1] == "正文内容。"
+
     def test_renders_footer_when_costs_present(self):
         doc = _make_doc(costs={"llm": 0.02}, timings={"process": 60})
         md = build_output_markdown(doc)

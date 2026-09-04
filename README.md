@@ -24,7 +24,7 @@
 - 结果缓存：同链接 + 同日期的重复运行直接复用已完成文稿，`--refresh` 强制重跑
 - 支持两种后处理方式：API 链路（`--llm-mode api`）走自动化校订，会话链路（`--llm-mode session`）在会话内处理
 - 记录转写耗时、实时系数和 LLM token 用量
-- 输出结构化 Markdown：Show Notes → 摘要 → 核心观点 → 问题与思考 → 术语表 → 人物简介 → 全文转录
+- 输出结构化 Markdown：Show Notes → 摘要 → 核心观点 → 问题与思考 → 术语表 → 人物简介 → 原文转录
 
 ## 完整链路
 
@@ -41,21 +41,21 @@
 ⑥ Markdown 组装：按固定结构写入
 
 输出：结构化 Markdown 文稿（固定结构）
-Show Notes → 摘要 → 核心观点 → 问题与思考 → 术语表 → 人物简介 → 全文转录
+Show Notes → 摘要 → 核心观点 → 问题与思考 → 术语表 → 人物简介 → 原文转录
 ```
 
 ## 两种后处理链路
 
 校订与结构化可以走自动化 API，也可以交给 AI 会话——后者在 API Key 无余额或想保持完全本地时非常实用。两条链路共用同一份转写与说话人区分结果，只在"后处理"这一步分叉。
 
-- **会话内（默认，免费）**：工具只完成转写与说话人区分，产出"会话输入包"——一份自包含文件，包含节目标题、来源、Show Notes 与带 `[SPEAKER_XX]` 标签的全文。内部处理方式已固化为固定规范（`src/processor/session_edit.py`，v12），规范提示词要求产出与自动化链路相同的完整结构——摘要、核心观点、问题与思考、术语表、人物简介与全文转录——并用内置校验器复核会话产出（含「全文转录 ≥ 原始转录 50%」的信息量硬线）。未配置 API Key 时自动走此链路。
+- **会话内（默认，免费）**：工具只完成转写与说话人区分，产出"会话输入包"——一份自包含文件，包含节目标题、来源、Show Notes 与带 `[SPEAKER_XX]` 标签的全文。内部处理方式已固化为固定规范（`src/processor/session_edit.py`，规范版本见该文件的 `SESSION_SPEC_VERSION`），规范提示词要求产出与自动化链路相同的完整结构——摘要、核心观点、问题与思考、术语表、人物简介与原文转录——并用内置校验器复核会话产出（含「原文转录 ≥ 原始转录 50%」的信息量硬线）。未配置 API Key 时自动走此链路。
 - **自动化（可选）**：同时配置 `LLM_API_KEY` 与 `LLM_BASE_URL` 后直接运行，工具按块校订全文，再生成摘要、核心观点、问题与思考、术语表和人物简介（规则见 `src/processor/prompt.py`）。模型不可用时自动降级为会话内链路。
 
 ## 会话内校订：保真重建与校验
 
-会话内校订（把 `_diarized.txt` 交给 AI 会话处理）最常见的问题是校订时把口语长叙述压缩成概要，触发校验器「全文转录 ≥ 原始转录 50%」的信息量硬线（报「疑似过度删减」）。校订应保留原文全部事例、数字与对话原貌，只做填充词删除、错字修正与分段。
+会话内校订（把 `_diarized.txt` 交给 AI 会话处理）最常见的问题是校订时把口语长叙述压缩成概要，触发校验器「原文转录 ≥ 原始转录 50%」的信息量硬线（报「疑似过度删减」）。校订应保留原文全部事例、数字与对话原貌，只做填充词删除、错字修正与分段。
 
-已过度压缩时无需手工重写，用保真重建工具从会话包一键重建全文转录：
+已过度压缩时无需手工重写，用保真重建工具从会话包一键重建原文转录：
 
 ```bash
 # 生成完整初稿 .md（标题/来源/Show Notes 取自会话包）
@@ -65,7 +65,7 @@ python -m src.processor.rebuild_transcript output/<节目>_diarized.txt -o outpu
 python -m src.processor.rebuild_transcript output/<节目>_diarized.txt \
     --speaker-map "SPEAKER_00:主播 Jean,SPEAKER_01:嘉宾姨姨" -o output/<节目>.md
 
-# 只替换既有 .md 的全文转录段（保留前面已校订的摘要/核心观点等章节）
+# 只替换既有 .md 的原文转录段（保留前面已校订的摘要/核心观点等章节）
 python -m src.processor.rebuild_transcript output/<节目>_diarized.txt -o output/<节目>.md --replace-transcript
 ```
 
@@ -88,7 +88,7 @@ python -m src.processor.finish_phase_b --speaker-preview
 
 **人工步骤（脚本清单之外的待办）**：
 
-1. **说话人映射**：按 `--speaker-preview` 画像 + 内容自述/指称/发言时间线判定身份，用保真重建替换全文转录：
+1. **说话人映射**：按 `--speaker-preview` 画像 + 内容自述/指称/发言时间线判定身份，用保真重建替换原文转录：
    ```bash
    python -m src.processor.rebuild_transcript <包> \
        --speaker-map "SPEAKER_00:主播xx,SPEAKER_01:嘉宾yy" -o <md> --replace-transcript
@@ -101,7 +101,7 @@ python -m src.processor.finish_phase_b --speaker-preview
 - 分块缓存按音频大小命中，重跑收敛：实测同一期三轮耗时 45 分 → 20 分 → 1 分 56 秒（缓存逐步补齐）；同链接重跑不重复转写已完成分块。
 - 音频已存在自动跳过下载；来源行缺「节目标题」中段时 `--fix-source` 自动用标题补齐。
 - 说话人聚类常过碎（2 人节目切出 18–28 个标签），按「自述/指称/发言时间线」归并；无法可靠拆分的混段保留 `[SPEAKER_XX]` 由人工复核（校验器放行，但报告会列出）。
-- 占比硬线：全文转录 ≥ 原始 50%；触发「疑似过度删减」时用 `rebuild_transcript --replace-transcript` 保真重建，不要手工压缩重写。
+- 占比硬线：原文转录 ≥ 原始 50%；触发「疑似过度删减」时用 `rebuild_transcript --replace-transcript` 保真重建，不要手工压缩重写。
 
 ## 模型选型
 
@@ -235,7 +235,7 @@ LLM_BASE_URL=https://your-provider/v1
 **身份姓名**：简介
 （正文格式）
 
-## 全文转录
+## 原文转录
 （校订后的分角色完整文稿）
 ```
 
@@ -291,7 +291,7 @@ src/
 │   ├── normalize.py        # 文本归一化
 │   ├── llm_processor.py    # 并行分块校订、模型探测回退、校验、缓存与文稿整理
 │   ├── session_edit.py     # 会话内校订：固定规范提示词 + 结构校验器 + CLI
-│   ├── rebuild_transcript.py  # 会话包保真重建全文转录（防过度删减）
+│   ├── rebuild_transcript.py  # 会话包保真重建原文转录（防过度删减）
 │   └── finish_phase_b.py   # Phase B 幂等续跑：扫描/生成缺失初稿/补来源行/校验报告/说话人画像
 └── renderer/markdown.py    # Markdown 渲染
 ```

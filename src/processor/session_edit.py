@@ -25,10 +25,18 @@ from pathlib import Path
 
 from src.config import DEFAULT_LLM_PROVIDER, LLM_MODELS, get_llm_config, llm_configured
 from src.diarization.speaker_resolver import COMMON_ALIASES
-from src.utils import SPEAKER_LABEL_RE
+from src.utils import (
+    LEGACY_TRANSCRIPT_HEADING,
+    SPEAKER_LABEL_RE,
+    TRANSCRIPT_HEADING,
+    TRANSCRIPT_HEADING_RE,
+    get_transcript_body,
+)
 
 logger = logging.getLogger(__name__)
 
+# v19：转录小节标题「全文转录」→「原文转录」。标题名现由 src.utils.TRANSCRIPT_HEADING
+#      单一权威源定义；读取侧（校验/重建/续跑）仍兼容旧标题，存量稿不会被判缺节。
 # 改动 SESSION_RULES 或输出结构时必须递增，让旧产出可与新规则区分。
 # v13：人物简介允许「（无）」，与自动渲染路径对齐；不确定人物信息时不编造。
 # v12：核心观点原话由 > 引用块改为行内直角引号「」（跟在展开句后）；观点内特有术语用缩进子条目就近解释；「关键词」小节更名「术语表」，只保留无法归入观点的残留术语（0 起、不强制 4-8），排除播客名/节目名/嘉宾名/平台名等专名。
@@ -50,7 +58,7 @@ logger = logging.getLogger(__name__)
 # v8：闪光语句改回正文格式（独立成段、不标注说话人、不用引用块）；v7 的 > 块+——说话人 作废。
 # v7：问题与思考改 1. 编号且问答分行；关键词补句号；全文转录说话人改【身份姓名】；
 #     新增第 10 条禁止「大纲」板块与 mermaid 思维导图。
-SESSION_SPEC_VERSION = 18
+SESSION_SPEC_VERSION = 19
 
 REQUIRED_HEADINGS = (
     "## Show Notes",
@@ -59,11 +67,16 @@ REQUIRED_HEADINGS = (
     "## 问题与思考",
     "## 术语表",
     "## 人物简介",
-    "## 全文转录",
+    TRANSCRIPT_HEADING,
 )
 
+# 小节别名：更名后旧稿仍可被校验，不因标题改名被判「缺少必需小节」。
+_HEADING_ALIASES: dict[str, tuple[str, ...]] = {
+    TRANSCRIPT_HEADING: (LEGACY_TRANSCRIPT_HEADING,),
+}
+
 # 会话内校订的固定规则：与 src/processor/prompt.py 的自动化规则保持同一套编辑口径。
-SESSION_RULES = """你是一名专业的中文播客文稿编辑。下面是一份自包含的会话输入包：节目标题、来源、Show Notes 与带 [SPEAKER_XX] 说话人标签的全文转录。请把全文校订并结构化为最终 Markdown 文稿。
+SESSION_RULES = """你是一名专业的中文播客文稿编辑。下面是一份自包含的会话输入包：节目标题、来源、Show Notes 与带 [SPEAKER_XX] 说话人标签的原文转录。请把全文校订并结构化为最终 Markdown 文稿。
 
 ## 输出结构（必须严格包含以下小节，顺序一致）
 
@@ -104,7 +117,7 @@ SESSION_RULES = """你是一名专业的中文播客文稿编辑。下面是一�
 **身份姓名**：简介
 （每人一行，正文格式，不用引用；身份依据 Show Notes 与对话内容，不确定时不编造。若无法确认任何人物信息，本节输出「（无）」）
 
-## 全文转录
+## 原文转录
 
 【身份姓名】说话内容
 （说话人标签已替换为真实身份+姓名，用中文方括号【】标注，如【主播湫湫】；按话题分段，段落间空一行）
@@ -125,7 +138,7 @@ SESSION_RULES = """你是一名专业的中文播客文稿编辑。下面是一�
 6. 双引号统一使用中文直角引号「」（英文术语、代码、URL 内的可保留英文引号）。标有引号或书名号的并列成分之间通常不用顿号（GB/T 15834-2011）：「甲」「乙」或《甲》《乙》直接并列即可，顿号多余；例外是并列项之间有括注等插入成分时宜用顿号。
 7. 摘要、核心观点、问题与思考、术语表、人物简介都只基于会话包内容生成，不编造原文没有的信息。
 8. 只校订，不创作：不扩写观点、不补充背景、不总结替代原文。
-9. 全文转录信息量硬线：保留原文全部事例、数字与对话原貌，口语长叙述不得压缩成概要；校验器以「全文转录 ≥ 原始转录 50%」为硬线（低于 50% 判为过度删减）。若已触发，用 `python -m src.processor.rebuild_transcript <会话包> -o <md>` 从会话包保真重建全文转录后再校订，不要手工重写压缩版。
+9. 原文转录信息量硬线：保留原文全部事例、数字与对话原貌，口语长叙述不得压缩成概要；校验器以「原文转录 ≥ 原始转录 50%」为硬线（低于 50% 判为过度删减）。若已触发，用 `python -m src.processor.rebuild_transcript <会话包> -o <md>` 从会话包保真重建原文转录后再校订，不要手工重写压缩版。
 10. 禁止额外板块：不得生成「大纲」小节，也不得用 mermaid 画思维导图（之前约定已删除该板块）。输出结构严格以上方「输出结构」所列小节为准，不得增删小节。
 """
 
@@ -176,7 +189,7 @@ _NON_NAME_MORPH = set(
 )
 
 # 职业/头衔词：出现在「我是 Y」里时，Y 是身份/职业自述而非他人姓名。
-# 例：Lenny 说「我是设计师」——他本就是主持人，讲职业背景，非串标（连漪确认 OK）。
+# 例：Lenny 说「我是设计师」——他本就是主持人，讲职业背景，非串标（已确认 OK）。
 _PROFESSION_WORDS = {
     "设计师", "工程师", "程序员", "架构师", "产品经理", "项目经理", "研究员",
     "科学家", "教授", "博士", "导师", "老师", "学生", "医生", "护士", "律师",
@@ -217,10 +230,15 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
     sections = _split_sections(md_text)
 
     for heading in REQUIRED_HEADINGS:
+        actual = heading
         if heading not in sections:
-            problems.append(f"缺少必需小节：{heading}")
-            continue
-        body = sections[heading].strip()
+            # 兼容历史别名（如旧稿的「## 全文转录」）：命中别名即视为该小节存在
+            alias = next((h for h in _HEADING_ALIASES.get(heading, ()) if h in sections), None)
+            if alias is None:
+                problems.append(f"缺少必需小节：{heading}")
+                continue
+            actual = alias
+        body = sections[actual].strip()
         if not body and heading != "## 术语表":
             # 术语表为「残留术语」区：允许 0 条（标题仍需存在，见上）
             problems.append(f"小节为空：{heading}")
@@ -306,18 +324,18 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
         elif not all(re.match(r"^\*\*.+?\*\*[:：]", line.strip()) for line in intro_lines):
             problems.append("人物简介条目应为 **身份姓名**：简介 格式")
 
-    # 全文转录：说话人须用中文方括号【身份姓名】，不得用 **加粗**：样式
-    transcript = sections.get("## 全文转录", "")
+    # 原文转录：说话人须用中文方括号【身份姓名】，不得用 **加粗**：样式
+    transcript = get_transcript_body(sections)
     if re.search(r"^\s*\*\*.+?\*\*[:：]", transcript, re.MULTILINE):
-        problems.append("全文转录说话人应使用中文方括号【身份姓名】，不要用 **加粗**：样式")
-    # 全文转录：不得残留未映射的 SPEAKER 标签（混段无法可靠拆分时可保留，但需人工复核）
+        problems.append("原文转录说话人应使用中文方括号【身份姓名】，不要用 **加粗**：样式")
+    # 原文转录：不得残留未映射的 SPEAKER 标签（混段无法可靠拆分时可保留，但需人工复核）
     leftover = SPEAKER_LABEL_RE.findall(transcript)
     if leftover:
         problems.append(
-            f"全文转录残留未映射的说话人标签（混段无法可靠拆分时可保留，但需复核）：{sorted(set(leftover))}"
+            f"原文转录残留未映射的说话人标签（混段无法可靠拆分时可保留，但需复核）：{sorted(set(leftover))}"
         )
 
-    # 全文转录：说话人标签与自称一致性（启发式标红疑似错位，不自动改）
+    # 原文转录：说话人标签与自称一致性（启发式标红疑似错位，不自动改）
     # 去噪：①谐音别名（小猪→小朱、秋秋→湫湫）按 COMMON_ALIASES 归一后再比对；
     #       ②只在 Y 像「人名」时才判错位——自述性短语（我是拌面/我是真人/我是本科学历）
     #         含人/生/友/者/的/做/在…语素，或非 2-3 字中文、非 2-4 字母，一律视为本人真实
@@ -343,12 +361,12 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
                 continue
             if y != label_core:
                 problems.append(
-                    f"全文转录中【{label}】段落出现自称「我是{y}」等指向他人「{y}」的表述，"
+                    f"原文转录中【{label}】段落出现自称「我是{y}」等指向他人「{y}」的表述，"
                     f"疑似说话人标签错位，请人工复核该段归属"
                 )
                 break
 
-    # 全文转录：说话人占比失衡（启发式，仅标红不自动改）
+    # 原文转录：说话人占比失衡（启发式，仅标红不自动改）
     # 两人对话里某人独占绝大多数段落，通常是 diarization 过度切分或标签归并错误
     # （如 vol.231：14 个伪说话人被错归并，嘉宾占满全文）。
     spk_openings = re.findall(r"^\s*【([^】]+)】", transcript, re.MULTILINE)
@@ -360,11 +378,11 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
         _total = sum(_cnt.values())
         if _top_n / _total > 0.85:
             problems.append(
-                f"说话人占比失衡：全文转录中【{_top}】独占 {_top_n}/{_total} 段"
+                f"说话人占比失衡：原文转录中【{_top}】独占 {_top_n}/{_total} 段"
                 f"（{_top_n / _total:.0%}），疑似 diarization 失败或说话人标签归并错误，请人工复核"
             )
 
-    # 全文转录：同一说话人相邻多段未合并（v16）
+    # 原文转录：同一说话人相邻多段未合并（v16）
     # 源转录按语音停顿切碎、同一人还常被判成多个簇，校订后若仍连续多段同标签，
     # 观感极碎且违反校订规则第 5 条。此处只标红提醒，不自动改（避免误并真实轮次）；
     # 确定性合并用 src.utils.merge_same_speaker_blocks。
@@ -381,7 +399,7 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
                 _cur_label, _cur_len = _cur, 1
         if _max_len >= 3:
             problems.append(
-                f"全文转录中【{_max_label}】连续 {_max_len} 段未合并：同一说话人的相邻段落必须合并为一段"
+                f"原文转录中【{_max_label}】连续 {_max_len} 段未合并：同一说话人的相邻段落必须合并为一段"
                 "（源转录按语音停顿切碎，同一人还常被 diarization 判成多个簇），"
                 "只有说话人真正切换时才另起一段（见校订规则第 5 条）；"
                 "可用 src.utils.merge_same_speaker_blocks 确定性合并"
@@ -391,10 +409,10 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
         ratio = len(transcript) / max(len(source_text), 1)
         if ratio < 0.5:
             problems.append(
-                f"全文转录长度仅为原始转录的 {ratio:.0%}（疑似过度删减）。"
+                f"原文转录长度仅为原始转录的 {ratio:.0%}（疑似过度删减）。"
                 "校订须保留原文全部信息（事例、数字、对话），只做填充词删除/错字修正/分段，"
                 "不得把口语叙述压缩成概要；若已过度压缩，可用 "
-            "`python -m src.processor.rebuild_transcript <包> -o <md>` 从会话包保真重建全文转录。"
+            "`python -m src.processor.rebuild_transcript <包> -o <md>` 从会话包保真重建原文转录。"
         )
 
     # 禁止额外小节（大纲）与 mermaid 思维导图
@@ -404,7 +422,7 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
         problems.append("不得生成 mermaid 思维导图，请移除相关代码块")
 
     # 代码块围栏完整性：v12 七段结构（Show Notes/摘要/核心观点/问题与思考/
-    # 术语表/人物简介/全文转录）均为标题+列表+段落，无代码块需求；
+    # 术语表/人物简介/原文转录）均为标题+列表+段落，无代码块需求；
     # 任何 ``` 围栏（含未闭合）都属异常，需移除（引用原文用「」或缩进，勿用 ```）。
     # 这是「内容被整段塞进未闭合代码块」类问题的机器可验硬约束（api 链路由
     # build_output_markdown 纯函数保证无围栏，此规则主要兜 session 链路/手动稿）。
@@ -428,11 +446,11 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
             "如「甲」「乙」或《甲》《乙》直接并列即可，顿号多余"
         )
 
-    # 全文转录标点过度切分检测：同一说话人话轮内若出现大量极短句（每个自然停顿都补了句号），
+    # 原文转录标点过度切分检测：同一说话人话轮内若出现大量极短句（每个自然停顿都补了句号），
     # 判定为 ASR 标点过度切分，应改为逗号连接的长句（见校订规则第 1 条 (b)）。
-    _trans_m = re.search(r"##\s*全文转录\s*\n(.*)$", md_text, re.DOTALL)
+    _trans_m = TRANSCRIPT_HEADING_RE.search(md_text)
     if _trans_m:
-        for _tline in _trans_m.group(1).splitlines():
+        for _tline in md_text[_trans_m.end() :].splitlines():
             _lm = re.match(r"^【[^】]*】\s*(.*)$", _tline)
             if not _lm:
                 continue
@@ -442,7 +460,7 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
             _tsents = [s for s in re.split(r"[。？！]", _tbody) if 0 < len(re.sub(r"\s", "", s)) <= 12]
             if len(_tsents) >= 5:
                 problems.append(
-                    "全文转录疑似标点过度切分：同一话轮内出现大量极短句（每个自然停顿都补了句号），"
+                    "原文转录疑似标点过度切分：同一话轮内出现大量极短句（每个自然停顿都补了句号），"
                     f"如「{_tsents[0][:12]}」。应按语义连读为逗号连接的长句，而非逐停顿断句"
                     "（见校订规则第 1 条 (b)）"
                 )

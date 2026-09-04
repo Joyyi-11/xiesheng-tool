@@ -75,7 +75,25 @@ def fmt_time(seconds: float) -> str:
 SPEAKER_LABEL_RE = re.compile(r"\[SPEAKER_\d+\]")
 SPEAKER_LINE_RE = re.compile(r"^\[(SPEAKER_\d+)\]\s*(.*)$", re.MULTILINE)
 
-# --- 全文转录：合并同一说话人的相邻段落（确定性操作，脚本化而非交给 LLM）---
+# --- 转录小节标题（单一权威源，各链路一律引用以下常量，禁止字面量硬编码）---
+# 2026-09-04 更名：「全文转录」→「原文转录」。读取侧仍兼容旧标题，避免存量成稿
+# 在校验、重建、续跑时被判为「缺少小节」。
+TRANSCRIPT_HEADING = "## 原文转录"
+LEGACY_TRANSCRIPT_HEADING = "## 全文转录"
+TRANSCRIPT_HEADINGS = (TRANSCRIPT_HEADING, LEGACY_TRANSCRIPT_HEADING)
+# 匹配任一历史写法的二级标题（用于正则定位转录段）
+TRANSCRIPT_HEADING_RE = re.compile(r"^##\s*(?:原文|全文)转录\s*$", re.MULTILINE)
+
+
+def get_transcript_body(sections: dict[str, str]) -> str:
+    """按 {标题: 正文} 取转录段正文，兼容旧标题「## 全文转录」。"""
+    for heading in TRANSCRIPT_HEADINGS:
+        if heading in sections:
+            return sections[heading]
+    return ""
+
+
+# --- 原文转录：合并同一说话人的相邻段落（确定性操作，脚本化而非交给 LLM）---
 # 成因：源转录按语音停顿切碎（同一人连续多段），且 diarization 常把同一人判成
 # 多个簇（如 SPEAKER_01/SPEAKER_03 都映射到同一姓名），映射后即为同名相邻段。
 # LLM 校订时是否合并不可控（同一份素材有时合并、有时不合并），故由脚本兜底。
@@ -85,7 +103,7 @@ _NO_SEP_TAIL = ("。", "！", "？", "…", "；", "，", "、", ".", "!", "?", 
 
 
 def merge_same_speaker_blocks(transcript: str) -> str:
-    """把「## 全文转录」正文里同一说话人的相邻段落合并为一段。
+    """把「## 原文转录」正文里同一说话人的相邻段落合并为一段。
 
     只做拼接与去重标签、不改动文字：连续（中间无其他说话人）的同名段落并成一段，
     段首只保留一次【身份姓名】；无标签的续行并入上一段。输入为空则原样返回。

@@ -38,7 +38,7 @@ def test_empty_glossary_and_speaker_intro_are_allowed():
 
 def test_leftover_speaker_label_is_blocking():
     problems = validate_output_doc(_doc(full_text="[SPEAKER_01] 正文。"))
-    assert problems == ["全文转录残留未映射说话人标签：[SPEAKER_01]"]
+    assert problems == ["原文转录残留未映射说话人标签：[SPEAKER_01]"]
 
 
 def test_assert_raises_with_combined_problems():
@@ -46,6 +46,6 @@ def test_assert_raises_with_combined_problems():
         assert_valid_output_doc(_doc(title=" ", full_text=""))
     except ValueError as exc:
         assert "缺少节目标题" in str(exc)
-        assert "全文转录为空" in str(exc)
+        assert "原文转录为空" in str(exc)
     else:
         raise AssertionError("expected ValueError")

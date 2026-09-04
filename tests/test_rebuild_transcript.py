@@ -101,22 +101,29 @@ class TestBuildMarkdown:
         md = build_markdown("标题", "> 来源：播客 | 标题 | 2026-01-01", "简介", "正文")
         assert md.startswith("# 标题\n")
         assert "## Show Notes" in md
-        assert "## 全文转录" in md
+        assert "## 原文转录" in md
         assert "正文" in md
         assert md.endswith("\n")
 
 
 class TestReplaceTranscriptSection:
     def test_replaces_from_transcript_heading_keeps_earlier_sections(self):
-        old = "# 标题\n\n## 摘要\n\n已有摘要\n\n## 全文转录\n\n旧内容\n"
+        old = "# 标题\n\n## 摘要\n\n已有摘要\n\n## 原文转录\n\n旧内容\n"
         new = replace_transcript_section(old, "新正文")
         assert "已有摘要" in new
         assert "旧内容" not in new
-        assert "## 全文转录\n\n新正文" in new
+        assert "## 原文转录\n\n新正文" in new
 
     def test_raises_when_heading_missing(self):
         with pytest.raises(ValueError):
             replace_transcript_section("# 只有标题\n", "正文")
+
+    def test_legacy_heading_is_upgraded(self):
+        # 更名前的旧稿（## 全文转录）替换后统一写回新标题，无需先手工改名
+        old = "# 标题\n\n## 摘要\n\n已有摘要\n\n## 全文转录\n\n旧内容\n"
+        new = replace_transcript_section(old, "新正文")
+        assert "## 全文转录" not in new
+        assert "## 原文转录\n\n新正文" in new
 
 
 class TestParseSpeakerMap:

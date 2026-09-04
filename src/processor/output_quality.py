@@ -20,7 +20,7 @@ def validate_output_doc(doc: OutputDoc) -> list[str]:
     if not doc.pub_date.strip():
         problems.append("缺少播出日期")
     if not doc.full_text.strip():
-        problems.append("全文转录为空")
+        problems.append("原文转录为空")
     if not doc.summary.strip():
         problems.append("摘要为空")
     if not doc.key_points:
@@ -34,7 +34,7 @@ def validate_output_doc(doc: OutputDoc) -> list[str]:
 
     leftover_speakers = sorted(set(SPEAKER_LABEL_RE.findall(doc.full_text)))
     if leftover_speakers:
-        problems.append("全文转录残留未映射说话人标签：" + "、".join(leftover_speakers))
+        problems.append("原文转录残留未映射说话人标签：" + "、".join(leftover_speakers))
 
     return problems
 

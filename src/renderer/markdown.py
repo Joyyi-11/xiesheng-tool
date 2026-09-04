@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from src.models.schemas import OutputDoc, KeyPoint, Keyword, QuestionItem, TermDef
-from src.utils import fmt_time, merge_same_speaker_blocks
+from src.utils import TRANSCRIPT_HEADING, fmt_time, merge_same_speaker_blocks
 
 _TIMING_LABELS = {
     "scrape": "抓取",
@@ -127,7 +127,7 @@ def build_output_markdown(doc: OutputDoc) -> str:
 
     # 同一说话人的相邻段落在渲染时确定性合并（脚本保证，不依赖 LLM）：源转录按停顿
     # 切碎、且同一人常被 diarization 判成多个簇，合并后才是「一人一段」的可读形态。
-    lines += ["", "## 全文转录", "", merge_same_speaker_blocks(doc.full_text)]
+    lines += ["", TRANSCRIPT_HEADING, "", merge_same_speaker_blocks(doc.full_text)]
 
     footer = _build_footer(doc)
     if footer:
