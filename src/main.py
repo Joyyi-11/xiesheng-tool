@@ -393,7 +393,8 @@ def main() -> None:
                         help="覆盖提供方的默认模型；可用逗号分隔指定多个候选，按顺序回退（如 qwen3.7-plus,gpt-5.2）")
     parser.add_argument("--llm-mode", choices=["api", "session"], default=None,
                         help="LLM 校对方式：api=流水线调用 LLM API（需 API Key）；"
-                             "session=在会话内由 agent 校对（无需 Key）。省略时自动检测（有 Key→api，无→session）")
+                             "session=在会话内由 agent 校对（无需 API Key，但仍由大模型完成，消耗会话额度/积分）。"
+                             "省略时自动检测（有 Key→api，无→session）")
     parser.add_argument("--no-llm", action="store_true",
                         help="[弃用] 等价于 --llm-mode session，后续版本移除")
     parser.add_argument("--no-diarization", action="store_true", help="跳过说话人日志，不区分说话人")
