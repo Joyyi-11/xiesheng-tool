@@ -35,6 +35,7 @@ class KeyPointOut(BaseModel):
     point: str = ""
     evidence: str = ""
     quote: str = ""
+    anchor: str = ""  # 回标锚点：原文转录区逐字出现的支撑句/短语
     terms: list[TermDefOut] = Field(default_factory=list)
 
     @property
@@ -56,6 +57,7 @@ class QuestionItemOut(BaseModel):
     model_config = {"str_strip_whitespace": True}
     question: str = ""
     answer: str = ""
+    anchor: str = ""  # 回标锚点：原文转录区逐字出现的支撑句/短语
 
     @property
     def valid(self) -> bool:
@@ -139,6 +141,7 @@ def struct_to_doc(struct: StructOut) -> dict[str, Any]:
                 "point": k.point,
                 "evidence": k.evidence,
                 "quote": _clean_str(k.quote),
+                "anchor": _clean_str(k.anchor),
                 "terms": [
                     {"term": t.term, "desc": t.desc} for t in k.terms if t.valid
                 ],
@@ -150,6 +153,7 @@ def struct_to_doc(struct: StructOut) -> dict[str, Any]:
         "keywords": [{"key": k.key, "desc": k.desc} for k in struct.keywords if k.valid],
         "summary": _clean_str(struct.summary),
         "questions": [
-            {"question": q.question, "answer": q.answer} for q in struct.questions if q.valid
+            {"question": q.question, "answer": q.answer, "anchor": _clean_str(q.anchor)}
+            for q in struct.questions if q.valid
         ],
     }

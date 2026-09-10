@@ -15,7 +15,7 @@ def _get_diarize():
         from diarize import diarize
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise RuntimeError(
-            "diarize 未安装。仅 --model paraformer-large 路径需要它；"
+            "diarize 未安装。--model paraformer-large 与 --diarization wespeaker 路径需要它；"
             "请安装可选依赖：pip install 'xiesheng[diarize]'"
         ) from exc
     return diarize
@@ -29,7 +29,7 @@ def run_diarization(audio_path: Path, num_speakers: int | None = None) -> list[d
 
     Returns list of dicts with start, end, speaker keys.
     """
-    logger.info("Running speaker diarization on %s...", audio_path.name)
+    logger.info("Running speaker diarization on %s...", getattr(audio_path, "name", audio_path))
     diarize_fn = _get_diarize()
     result = diarize_fn(str(audio_path), num_speakers=num_speakers)
     segments = [

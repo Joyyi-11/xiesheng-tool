@@ -13,7 +13,9 @@
 ## 功能
 
 - 爬取小宇宙播客节目信息、Show Notes
-- 下载音频并转写为文字（本地 FunASR SenseVoice-Small，免费；整段音频串行转录，本机实测约 3–5x 实时、RTF 0.2–0.33）
+- 下载音频并转写为文字（本地 FunASR SenseVoice-Small，免费；整段音频串行转录，本机实测约 6–9x 实时、RTF 0.11–0.17，1 小时音频约 7–10 分钟转写；仅裸模型转写，不含 LLM 校订，+LLM 校订另需按块耗时，端到端约十几到二十余分钟）
+
+> **RTF（Real Time Factor，实时率）**：衡量转写速度的指标，RTF 越小速度越快。公式为 `RTF = 处理音频所需时间 ÷ 音频原始时长`。例如一段 1 小时（60 分钟）的音频，若转写花了 6 分钟，则 `RTF = 6 ÷ 60 = 0.1`。
 - 千问或 DeepSeek 分块校订：错字修正、口语清理、语义分段、专名纠错（分块并行校订）
 - LLM 模型自动回退：按 `--llm-model` 候选列表（逗号分隔）或网关 `/models` 自动选可用模型，404 `model_not_found` 不再白白重试，过载（429/502/503）指数退避
 - 会话内校订固化：`python -m src.processor.session_edit <episode>_diarized.txt` 输出固定规范提示词，附带结构校验器保证输出格式稳定
@@ -71,15 +73,27 @@ python -m src.processor.rebuild_transcript output/<节目>_diarized.txt -o outpu
 
 重建初稿保留 100% 原文信息量（必然 ≥50% 阈值），在此底稿上做填充词清理与纠错即可，不会再触发「过度删减」。
 
-## 批量转录 SOP（10 期批量实测沉淀）
+## 批量转录 SOP（多期实测沉淀 · 2026-09-07 更新跑法）
 
 两阶段、两条命令 + 两件人工事。核心原则：**可自动的全部脚本化，不可自动的由幂等脚本列出待办**——任何中断重跑同一条命令即收敛，不依赖「AI 会话跨轮次续跑」。
 
-```bash
-# Phase A：批量转写 + 说话人区分（多 URL 一次跑；内存紧张务必 --jobs 1 防 OOM）
-python -m src.main --llm-mode session <url1> <url2> ... --jobs 1
+**节奏规则**：Phase A 全量转录后台自动跑完（零值守，期间机器勿跑重程序）→ Phase B 逐批校订（每轮 3–5 集）。**不要「转一集校一集」**——转录 6–52 分钟/集节奏不均，会让人碎片化干等；且同主题批量集集中校订可横向统一术语与人物称谓（素材合集尤其重要）。diarized 是静态文件，校订质量不随时间衰减。
 
-# Phase B：幂等续跑（扫描全部 _diarized → 生成缺失初稿、补齐来源行三要素、校验报告）
+### Phase A：批量转录（逐集独立进程，禁止单进程跨集）
+
+逐集独立进程循环（Git Bash）；每集一个独立进程，退出即还内存，缓存幂等可续跑：
+
+```bash
+for url in "<url1>" "<url2>" "<url3>"; do
+    python -m src.main --llm-mode session "$url"
+    sleep 20   # 集间等待内存回收
+done
+```
+
+⚠️ **勿用 `python -m src.main <url1> <url2> ... --jobs 1` 单进程跨集串行**：`_release_asr()`（每集转写完成释放主模型）引入后，第 2 集起由主进程二次加载 FunASR 全套模型必段错误（exit 139、无 traceback）。`--jobs 1` 只可用于单集；`--jobs 2` 走 worker 子进程加载可跨集（历史 10 期批量实证），但逐集独立进程最稳、内存最省。
+
+```bash
+# Phase B：幂等续跑（全部转录完成后一次跑；扫描全部 _diarized → 生成缺失初稿、补齐来源行三要素、校验报告）
 python -m src.processor.finish_phase_b --all
 
 # 辅助：说话人画像（每个 [SPEAKER_XX] 的段数/字符数/首段样本，判定映射归属）
@@ -93,11 +107,13 @@ python -m src.processor.finish_phase_b --speaker-preview
    python -m src.processor.rebuild_transcript <包> \
        --speaker-map "SPEAKER_00:主播xx,SPEAKER_01:嘉宾yy" -o <md> --replace-transcript
    ```
-2. **上层章节**：摘要/核心观点/问题与思考/术语表/人物简介需人工撰写（生成初稿中为「待校订」占位，脚本据此列出待办清单）。
+2. **上层章节**：摘要/核心观点/问题与思考/术语表/人物简介需人工撰写（生成初稿中为「待校订」占位，脚本据此列出待办清单）。**每轮 3–5 集分批撰写**，同一主题批次集中处理、术语与人物称谓横向统一。
 
 **经验要点**：
 
-- 并行与内存：默认 `--jobs 2`，工具按可用内存自动降档 worker 数（宁慢不崩，见上方「转写与后处理」）；本机（16GB、页面文件紧张）早期版本实测 jobs>1 曾 OOM（BrokenProcessPool），若你的机器内存紧张或页面文件不足，显式 `--jobs 1` 串行最稳；串行 RTF 0.10–0.16，即 1 小时音频约 8–10 分钟转写。
+- 并行与内存（单集内）：默认 `--jobs 2`，工具按可用内存自动降档 worker 数（宁慢不崩）；显式 `--jobs 1` 回退单集串行，RTF 0.10–0.16（1 小时音频约 8–10 分钟转写）。**jobs 选择与「批量跑法」是两回事**：jobs 是单集内分块并行度，跨集请一律走上面的逐集独立进程循环。
+- 故障诊断：exit 139 无 traceback = native 崩溃，看崩溃前最后几行日志定位阶段（模型加载/跨段对齐 cam++ 入口/spk 聚类都可能崩）。**先查是不是多集跑成了 `--jobs 1` 单进程跨集**：`_release_asr()` 之后主进程再加载 FunASR 必段错误，这是批量崩溃的首要原因；**单集时长不构成风险**（130min 单集在可用内存 2–4GB 下实测一次跑通，RTF 0.07），不必为长音频单独安排跑法或调高内存门槛。代理间歇 502（连下载都失败）→ 重试即可，与本地无关。
+- 日志坑：`rc=$?` 必须紧跟命令捕获（`$(date)` 等命令替换会吞掉退出码）；tqdm 的 `\r` 会把 bash echo 的结束标记顶进同一行 → grep 结束标记须匹配「结束 exit=」全文而非行首。
 - 分块缓存按音频大小命中，重跑收敛：实测同一期三轮耗时 45 分 → 20 分 → 1 分 56 秒（缓存逐步补齐）；同链接重跑不重复转写已完成分块。
 - 音频已存在自动跳过下载；来源行缺「节目标题」中段时 `--fix-source` 自动用标题补齐。
 - 说话人聚类常过碎（2 人节目切出 18–28 个标签），按「自述/指称/发言时间线」归并；无法可靠拆分的混段保留 `[SPEAKER_XX]` 由人工复核（校验器放行，但报告会列出）。
@@ -105,7 +121,7 @@ python -m src.processor.finish_phase_b --speaker-preview
 
 ## 模型选型
 
-转写后端默认 **FunASR SenseVoice-Small**（CPU 本机实测约 3–5x 实时、RTF 0.2–0.33，随硬件与内存浮动；长音频精度与 Paraformer 相当、原生多语种、+LLM 后处理即可补足英文专名大小写）。Paraformer-Large 作为可选 `--model paraformer-large`，适合需要**热词定制**（常驻嘉宾名/产品名）或最稳**字级时间戳**的场景。原 faster-whisper 路线已移除——它的提速完全依赖 ffmpeg 切片 + 多进程并行，该机制退役后 Whisper 只剩 ~1x 串行的裸速度，留作兜底只会慢到超时/失败。
+转写后端默认 **FunASR SenseVoice-Small**（CPU 本机实测约 6–9x 实时、RTF 0.11–0.17，随硬件、内存与 CPU 占用浮动；长音频精度与 Paraformer 相当、原生多语种、+LLM 后处理即可补足英文专名大小写）。Paraformer-Large 作为可选 `--model paraformer-large`，适合需要**热词定制**（常驻嘉宾名/产品名）或最稳**字级时间戳**的场景。原 faster-whisper 路线已移除——它的提速完全依赖 ffmpeg 切片 + 多进程并行，该机制退役后 Whisper 只剩 ~1x 串行的裸速度，留作兜底只会慢到超时/失败。
 
 三模型同期的实跑对比实验与最终选型决策记录在 [`benchmark/vol74-asr-comparison/`](benchmark/vol74-asr-comparison/README.md)。
 
@@ -167,7 +183,7 @@ xiesheng --server
 xiesheng url1 url2 url3 ... --use-server http://127.0.0.1:8765
 ```
 
-转写默认长音频分块并行（`--jobs` 默认 2 个 worker 进程，各 worker 自带模型常驻，批量/常驻服务下只加载一次）；速度取决于硬件与内存：本机（i5-12500H / 16GB）串行实测约 3–5x 实时（RTF 0.2–0.33），内存充足时并行可进一步接近翻倍。内存紧张会退化为交换、明显变慢甚至停滞，因此工具会按可用内存自动降档 worker 数（宁慢不崩），也可显式 `--jobs 1` 回退串行。若内存宽松想提速，可尝试 `--batch-size-s 90/120` 并对照 RTF 与输出精度做 A/B：提速且精度不下降即可保留，否则回退默认值。
+转写默认长音频分块并行（`--jobs` 默认 2 个 worker 进程，各 worker 自带模型常驻，批量/常驻服务下只加载一次）；速度取决于硬件与内存：本机（i5-12500H / 16GB）串行实测约 6–9x 实时（RTF 0.11–0.17），内存充足时并行可进一步接近翻倍。内存紧张会退化为交换、明显变慢甚至停滞，因此工具会按可用内存自动降档 worker 数（宁慢不崩），也可显式 `--jobs 1` 回退串行（仅限单集、worker 或常驻服务路径；批量多集勿在主进程跨集串行，见「批量转录 SOP」）。若内存宽松想提速，可尝试 `--batch-size-s 90/120` 并对照 RTF 与输出精度做 A/B：提速且精度不下降即可保留，否则回退默认值。
 
 ## 前置依赖
 
@@ -197,13 +213,15 @@ LLM_BASE_URL=https://your-provider/v1
 | `--speakers` | 自动检测 | 明确指定说话人数 |
 | `--llm-mode {api,session}` | 否 | LLM 执行方式：`api`=调 API Key 自动化校订，`session`=会话内由 agent 校订（按会话积分计费，同样要付费）；默认自动检测：有 Key→api，无→session；`--no-llm` 为弃用别名，等价于 `session` |
 | `--no-diarization` | 否 | 跳过说话人识别 |
+| `--diarization {campplus,wespeaker,auto}` | `campplus` | 说话人分离后端：`campplus`=SenseVoice 自带 cam++（零额外成本，2-3 人清晰对谈最优）；`wespeaker`=外部 diarize 全局 embedding，圆桌/塌缩更稳但单集 +7~11 分钟；`auto`=按花名册/自报人数自动选（≥3 人或圆桌走 wespeaker，否则 cam++） |
+| `--refresh-diarization` | 否 | 仅重跑说话人分离，复用已持久化的转录结果、不重跑 ASR（替代旧的 `--refresh --diarization wespeaker` 全量重转录；原 cam++ 稿自动 `.bak` 备份） |
 | `--spk-max-seg-ms` | `4000` | 说话人分离粒度：VAD 段上限（毫秒），段越短越不易把两人快速接话并成一段；可回退 `8000` |
 | `--batch-size-s` | `60` | FunASR VAD 批切段时长（秒）：越大单次送入越长、调用次数越少但峰值内存越高；内存紧张默认保守，可在 90/120 间 A/B 验证后上调 |
 | `--server` | 否 | 启动常驻转写服务（模型只加载一次，HTTP 接口见 src/server.py） |
 | `--server-port` | `8765` | 常驻转写服务端口 |
 | `--use-server` | 无 | 走常驻转写服务（如 http://127.0.0.1:8765），本进程不加载模型 |
 | `--audio` | 无 | 复用已有的 16k mono WAV（需为本期音频），跳过下载与转换 |
-| `--jobs` | `2` | 长音频分块并行转写的 worker 进程数（默认 2；内存紧张自动降档，可用 `--jobs 1` 回退串行） |
+| `--jobs` | `2` | 长音频分块并行转写的 worker 进程数（默认 2；内存紧张自动降档，可用 `--jobs 1` 回退单集串行。批量多集请按「批量转录 SOP」逐集独立进程跑，勿 `--jobs 1` 主进程跨集） |
 | `--refresh` | 否 | 忽略结果缓存，强制重新转录与整理 |
 
 ## 输出格式

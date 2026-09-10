@@ -31,19 +31,12 @@ CONTEXT_CHARS = 500
 CHUNK_CONCURRENCY = 4  # 分块校订并行度；并发过多易触发限流
 MIN_CLEAN_RATIO = 0.55
 MAX_CLEAN_RATIO = 1.35
-# 修改 CLEAN 提示词或分块/对齐逻辑时递增，使旧校订分块缓存作废。
-PROMPT_VERSION = 4
-# 结构化（summary+keywords+outline 合并）提示词版本：改动提示词或解析时递增。
-# v9：questions.question 明确为纯文本（禁止自带 ** 加粗），渲染侧 markdown.py 统一
-#     输出 `1. **问题？**`（序号在加粗外），与 session 路径 v18 规则对齐。
-# v8：核心观点改为「观点句（句号结尾）+ 展开论述句 + 引用句」顺次相接，禁止 point 以
-#     冒号收尾引出 evidence；渲染侧由 markdown.py 确定性去冒号并补句末标点（v17 结构）。
-# v7：CLEAN 提示词 rule 2 扩展「断句」覆盖句间过度切分（相邻两句本应逗号连读却被句号拆开），与 session 路径校订规则第 1 条 (b) 对齐。
-# v6：问题与思考要求强化——answer 须直接解答问题（结尾不得反抛新问号），引用人物须首次点明「姓名（身份）」、禁止裸代词；问题须提炼全文核心议题。
-# v5：核心观点原话改行内直角引号（不再单独引用块）；新增 key_points.terms 就近解释观点内特有术语；
-# keywords 改为只放残留术语（0-4 个）、排除播客名/节目名/嘉宾名/平台名等专名。
-# v4：speaker_mapping 增加「多人混段不映射、保留 [SPEAKER_XX]」约束（Vol.11 错乱修复）。
-STRUCT_PROMPT_VERSION = 9
+# CLEAN/STRUCT 提示词文本已全部由 src.processor.rules 组装（规则单一权威源），
+# 缓存版本直接引用 RULES_SPEC_VERSION：任何编辑口径变更都自动作废旧缓存。
+from src.processor.rules import RULES_SPEC_VERSION as _RULES_VERSION  # noqa: E402
+
+PROMPT_VERSION = _RULES_VERSION
+STRUCT_PROMPT_VERSION = _RULES_VERSION
 
 _TIME_RE = re.compile(r"^(?:(\d+):)?(\d+):(\d+)$")
 
@@ -691,6 +684,7 @@ def _build_output_doc(
             point=kp.point,
             evidence=kp.evidence,
             quote=kp.quote,
+            anchor=kp.anchor,
             terms=[TermDef(term=t.term, desc=t.desc) for t in kp.terms if t.valid],
         )
         for kp in struct.key_points
@@ -708,7 +702,7 @@ def _build_output_doc(
                 full_text,
             )
     questions = [
-        QuestionItem(question=q.question, answer=q.answer)
+        QuestionItem(question=q.question, answer=q.answer, anchor=q.anchor)
         for q in struct.questions
         if q.valid
     ]

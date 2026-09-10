@@ -73,10 +73,13 @@ class TestStructToDoc:
         doc = struct_to_doc(parse_struct(raw))
         assert doc["key_points"][0]["point"] == "观点"
         assert doc["key_points"][0]["quote"] == "原话"
+        assert doc["key_points"][0]["anchor"] == ""
         assert doc["speaker_mapping"] == {"SPEAKER_00": "A"}
         assert doc["keywords"][0]["key"] == "词"
         assert doc["summary"] == "本期讲求职"
-        assert doc["questions"] == [{"question": "找不到工作是谁的问题？", "answer": "策略错位。"}]
+        assert doc["questions"] == [
+            {"question": "找不到工作是谁的问题？", "answer": "策略错位。", "anchor": ""}
+        ]
 
     def test_strips_whitespace_and_drops_invalid(self):
         doc = struct_to_doc(
@@ -87,5 +90,7 @@ class TestStructToDoc:
                 }
             )
         )
-        assert doc["key_points"] == [{"point": "a", "evidence": "e", "quote": "", "terms": []}]
+        assert doc["key_points"] == [
+            {"point": "a", "evidence": "e", "quote": "", "anchor": "", "terms": []}
+        ]
         assert doc["keywords"] == []

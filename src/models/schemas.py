@@ -36,6 +36,7 @@ class KeyPoint:
     evidence: str
     quote: str = ""  # optional verbatim quote from the transcript (忠实原文，渲染为行内直角引号)
     terms: list[TermDef] = field(default_factory=list)  # 观点内特有术语的就近解释
+    anchor: str = ""  # 回标锚点：该观点在原文转录区逐字出现的支撑句/短语（L3 提炼时给出）
 
 
 @dataclass
@@ -55,6 +56,7 @@ class QuestionItem:
     """
     question: str
     answer: str = ""
+    anchor: str = ""  # 回标锚点：该问题在原文转录区逐字出现的支撑句/短语（L3 提炼时给出）
 
 
 @dataclass

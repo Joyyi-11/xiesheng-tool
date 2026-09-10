@@ -54,6 +54,41 @@ _HOST_RE = re.compile(r"邀请了两位|邀请了|给大家介绍|今天邀请|�
 _ROLE_PREFIX = re.compile(r"^(?:主[播持理]人?|嘉宾|客座)")
 _PAREN = re.compile(r"[（(][^）)]*[）)]")
 
+# 数词（「三位」「N 位」「N 人」）→ 显式说话人数；用于抬高 base_k，避免圆桌集
+# 被低估成 2 人（如「斯怡、机器坏人、404 三位」花名册只抓到 2 人）。
+# 负向零宽断言排除「第N位」（序数，非人数，如「第三位出场」）。
+_COUNT_RE = re.compile(r"(?<!第)([0-9]+|[一二三四五六七八九十百两]+)\s*[位人]")
+# 散文并列名字紧接数词：捕捉无角色前缀的漏网者（「斯怡、机器坏人、404 三位」）。
+# 关键约束：人数标记必须是「数词（中文/阿拉伯）+ 位/人」整体，数词本身要被吃进正则
+# （[0-9一二三四五六七八九十百两两]+\s*[位人]），否则「三位」里的「位」被前面的「三」
+# 挡住、lookbehind 永远落在「三」而非「位」上，整条匹配失败、404 抓不到。
+# 吃进数词也顺带排除了「机器坏人」末尾的「人」（前面不是数词，不构成人数标记）。
+# 名字片段黑名单剔除「本期/请到」等非人名片段。
+_PROSE_NAME = r"[一-龥A-Za-z·0-9]{1,8}"
+_PROSE_RE = re.compile(rf"({_PROSE_NAME}(?:[、，,]{_PROSE_NAME}){{0,6}})\s*[0-9一二三四五六七八九十百两两]+\s*[位人]")
+_NAME_BLACKLIST = ("请到", "本期", "这期", "该期")
+
+_CN = {
+    "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+
+def _cn_to_int(s: str) -> int | None:
+    """把阿拉伯或中文数词转成 int；越界/无法解析返回 None。"""
+    if s.isdigit():
+        return int(s)
+    if s in _CN:
+        return _CN[s]
+    if "十" in s:
+        left, _, right = s.partition("十")
+        if left and right:
+            return _CN.get(left, 0) * 10 + _CN.get(right, 0)
+        if left:  # X十
+            return _CN.get(left, 0) * 10
+        return 10 + _CN.get(right, 0)  # 十X
+    return None
+
 # 口语自称与 Show Notes 花名册姓名的同音/昵称别名表。
 # 解析时口语自称（如「小猪」「秋秋」）据此对齐到花名册正式姓名（「小朱」「湫湫」），
 # 避免同一人因自称与花名册写法不同而落为 [SPEAKER_XX]。
@@ -119,7 +154,36 @@ def parse_roster_with_roles(show_notes: str) -> list[tuple[str, str]]:
             continue
         if (role, name) not in out:
             out.append((role, name))
+    # 第二遍：散文并列名字（无角色前缀，如「斯怡、机器坏人、404 三位」）。
+    # 角色词前缀抓不到的漏网者补进花名册（角色置空，仅作已知姓名，不假设主/宾）。
+    known = {n for _, n in out}
+    for m in _PROSE_RE.finditer(clean):
+        for nm in re.split(r"[、，,]", m.group(1)):
+            nm = nm.strip()
+            if len(nm) < 2 or nm in _STOPWORDS or nm in known:
+                continue
+            # 与已有花名册姓名是包含关系则跳过（如「斯怡」⊂「斯怡Jins」），
+            # 避免同一人因散文里带/不带后缀被拆成两条、虚抬 base_k。
+            if any(nm in n or n in nm for n in known):
+                continue
+            if any(b in nm for b in _NAME_BLACKLIST):
+                continue
+            out.append(("", nm))
+            known.add(nm)
     return out
+
+
+def parse_stated_speaker_count(show_notes: str) -> int | None:
+    """从 Show Notes 解析显式人数（「三位」「N 位」「N 人」，排除「第N位」序数）。
+
+    返回最大人数；无则 None。用于抬高 diarization 的 base_k，避免圆桌集被
+    低估成 2 人导致 cam++ 系统性塌缩（实测：guide 三期只抓到 2 人）。
+    """
+    if not show_notes:
+        return None
+    clean = re.sub(r"[【】]", "", show_notes)
+    counts = [c for c in (_cn_to_int(g) for g in _COUNT_RE.findall(clean)) if c]
+    return max(counts) if counts else None
 
 
 def _cluster_signals(segments: list[dict]) -> dict[str, dict]:

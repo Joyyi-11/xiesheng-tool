@@ -1,7 +1,12 @@
 """Tests for the Markdown renderer."""
 
 from src.models.schemas import KeyPoint, Keyword, OutputDoc, QuestionItem, TermDef
-from src.renderer.markdown import build_output_markdown, fmt_ts
+from src.renderer.markdown import (
+    _apply_bold_anchors,
+    _collect_bold_anchors,
+    build_output_markdown,
+    fmt_ts,
+)
 
 
 def _make_doc(**kw):
@@ -170,3 +175,142 @@ class TestBuildOutputMarkdown:
     def test_renders_quality_warnings(self):
         md = build_output_markdown(_make_doc(warnings=["分块 1 校订失败，已回退原稿"]))
         assert "> [WARN] 分块 1 校订失败，已回退原稿" in md
+
+
+class TestTranscriptAnchorBolding:
+    """原文转录回标锚点加粗（连漪：核心观点句/问题句/术语在原文首次出现处加粗）。"""
+
+    def _doc(self, full_text, **kw):
+        defaults = {
+            "title": "标题",
+            "podcast_name": "播客",
+            "pub_date": "2026-01-01",
+            "show_notes": "简介",
+            "speaker_intro": "**主播**：某人",
+            "key_points": [],
+            "questions": [],
+            "keywords": [],
+        }
+        defaults.update(kw)
+        return OutputDoc(full_text=full_text, **defaults)
+
+    def test_bolds_quote_anchor_at_first_occurrence(self):
+        doc = self._doc(
+            "【主播】大家好，先说一句：模型塌缩不可避免。\n\n【嘉宾】对，模型塌缩不可避免，关键是筛选数据。",
+            key_points=[
+                KeyPoint(
+                    point="模型塌缩不可避免。",
+                    evidence="关键在于筛选",
+                    quote="模型塌缩不可避免",
+                )
+            ],
+        )
+        md = build_output_markdown(doc)
+        transcript = md.split("## 原文转录", 1)[1]
+        # 首次出现处加粗；第二次出现（嘉宾重复）不再加粗
+        assert "【主播】大家好，先说一句：**模型塌缩不可避免**。" in transcript
+        assert "【嘉宾】对，模型塌缩不可避免，关键是筛选数据。" in transcript
+
+    def test_bolds_explicit_keypoint_anchor(self):
+        doc = self._doc(
+            "【主播】欢迎收听。\n\n【嘉宾】我们准备了这次聊天的问题清单。",
+            key_points=[
+                KeyPoint(point="准备比临场重要。", evidence="证据", anchor="准备了这次聊天的问题清单")
+            ],
+        )
+        md = build_output_markdown(doc)
+        assert "**准备了这次聊天的问题清单**" in md
+
+    def test_bolds_question_anchor(self):
+        doc = self._doc(
+            "【主播】那我想先问，开源模型最大的结构性缺陷是什么？\n\n【嘉宾】数据飞轮转不起来。",
+            questions=[
+                QuestionItem(
+                    question="开源模型最大的结构性缺陷是什么？",
+                    answer="数据飞轮转不起来。",
+                    anchor="开源模型最大的结构性缺陷是什么",
+                )
+            ],
+        )
+        md = build_output_markdown(doc)
+        assert "**开源模型最大的结构性缺陷是什么**？" in md
+
+    def test_bolds_glossary_keyword(self):
+        doc = self._doc(
+            "【嘉宾】数据飞轮转不起来，这是开源模型的结构性难题。",
+            keywords=[Keyword(key="数据飞轮", desc="开源模型无法回流用户数据的缺陷")],
+        )
+        md = build_output_markdown(doc)
+        assert "**数据飞轮**转不起来" in md
+
+    def test_speaker_label_never_bolded(self):
+        # 锚点若与【标签】同名/同子串，不得把说话人标签加粗
+        doc = self._doc(
+            "【主播】这里是主播开场。\n\n【嘉宾】我是嘉宾。",
+            keywords=[Keyword(key="主播", desc="节目主持人")],
+        )
+        md = build_output_markdown(doc)
+        assert "【**主播**】" not in md
+
+    def test_already_bolded_span_not_double_bolded(self):
+        # 长锚先加粗后，其内部的短锚（可能是长锚子串）不得二次加粗
+        doc = self._doc(
+            "【嘉宾】模型塌缩不可避免，关键在于对生成数据的筛选。",
+            key_points=[
+                KeyPoint(point="A。", evidence="e", anchor="模型塌缩不可避免，关键在于对生成数据的筛选"),
+                KeyPoint(point="B。", evidence="e", anchor="模型塌缩不可避免"),
+            ],
+        )
+        md = build_output_markdown(doc)
+        assert "**模型塌缩不可避免，关键在于对生成数据的筛选**。" in md
+        assert "****" not in md
+
+    def test_overlong_anchor_skipped(self):
+        # 显式 anchor 限 ≤40 字、quote 限 ≤24 字：超长视为噪音跳过，不加粗
+        doc = self._doc(
+            "【嘉宾】这是一段很长的原文，用来测试超长锚点不会触发加粗行为。",
+            key_points=[
+                KeyPoint(
+                    point="P。",
+                    evidence="e",
+                    anchor="这是一段很长的原文，用来测试超长锚点不会触发加粗行为（超过四十字）",
+                    quote="这是一段很长的原文，用来测试超长锚点不会触发加粗行为（超过二十四字）",
+                )
+            ],
+        )
+        md = build_output_markdown(doc)
+        assert "**" not in md.split("## 原文转录", 1)[1]
+
+    def test_anchor_missing_in_transcript_silently_skipped(self):
+        # 锚点未在转录中出现（校订后措辞变化）时不报错、不改字
+        doc = self._doc(
+            "【嘉宾】实际转录里是另一句话。",
+            key_points=[KeyPoint(point="P。", evidence="e", anchor="原文里并不存在的句子")],
+        )
+        md = build_output_markdown(doc)
+        assert "**" not in md.split("## 原文转录", 1)[1]
+
+    def test_bolds_within_speaker_labeled_transcript_line(self):
+        # 标签与正文同行时，只加粗正文部分、标签保留
+        md = _apply_bold_anchors("【主播】今天聊模型塌缩。\n【嘉宾】模型塌缩确实存在。", ["模型塌缩"])
+        assert md == "【主播】今天聊**模型塌缩**。\n【嘉宾】模型塌缩确实存在。"
+
+    def test_anchor_not_rebolded_across_lines(self):
+        # 同一锚点全局只在首次出现处加粗一次
+        md = _apply_bold_anchors(
+            "【A】第一次出现锚点。\n【B】第二次出现锚点。\n【C】第三次出现锚点。",
+            ["出现锚点"],
+        )
+        assert md.count("**出现锚点**") == 1
+
+    def test_collect_anchors_dedup_and_sort(self):
+        # 收集锚点：quote/terms/keywords/anchor 合并、去重、按长度降序
+        doc = self._doc(
+            "",
+            key_points=[
+                KeyPoint(point="P。", evidence="e", quote="短引", anchor="一个较长的显式锚点"),
+            ],
+            keywords=[Keyword(key="短引", desc="d")],
+        )
+        anchors = _collect_bold_anchors(doc)
+        assert anchors == ["一个较长的显式锚点", "短引"]

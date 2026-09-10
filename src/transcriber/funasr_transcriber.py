@@ -352,6 +352,31 @@ class FunASRTranscriber(Transcriber):
         logger.info("cam++ SV loaded in %.1f sec", time.time() - t0)
         return self._sv_model
 
+    def _release_asr(self) -> None:
+        """转写完成后释放 ASR 主模型（sensevoice+vad+punc），只留 cam++ 做跨段对齐。
+
+        四模型同时驻留会把 16GB 机器顶爆：转写阶段峰值 ~2.5GB，而跨段说话人对齐
+        只需 cam++ 单独前向，sensevoice/punc/vad 此刻已无意义却仍占 ~2.2GB，导致对齐
+        阶段内存峰值过高、进程段错误。先行释放，对齐阶段峰值大幅下降，根治长音频在
+        内存紧张机器上的收尾崩溃。对齐不依赖 ASR 主模型，释放后仅对齐/合并仍可用。
+        """
+        if self._model is None and self._punc_model is None:
+            return
+        self._model = None
+        self._punc_model = None
+        self._loaded = False
+        try:
+            import gc
+
+            import torch
+
+            gc.collect()
+            if getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001 - 释放失败不应中断对齐流程
+            pass
+        logger.info("已释放 ASR 主模型（sensevoice/vad/punc），仅保留 cam++ 用于跨段对齐")
+
     # --- progress status (written to work_dir/status.json, inspectable cross-session) ---
     def _write_status(self, work_dir, stage: str, progress: float, msg: str = "") -> None:
         if work_dir is None:
@@ -653,6 +678,10 @@ class FunASRTranscriber(Transcriber):
                     work_dir, "transcribe", 0.1 + 0.8 * i / total, f"转写 {i}/{total} 段"
                 )
 
+        # 跨段对齐只需 cam++，先释放已无用的 ASR 主模型，避免四模型同驻顶爆内存
+        # （压低对齐阶段峰值；注意释放是单向的——若同一主进程后续再跑第二集，
+        #  二次加载 FunASR 会段错误 exit 139，故批量必须逐集独立进程，见 README）。
+        self._release_asr()
         if rep_clips:
             self._write_status(work_dir, "align", 0.92, "跨段说话人对齐中")
             mapping = self._align_speakers(rep_clips, num_speakers)
@@ -1129,7 +1158,11 @@ class FunASRTranscriber(Transcriber):
             else:
                 cleaned.append("")
 
-        punc_model = self._get_punc_model()
+        # 独立 ct-punc 仅在显式需要二次补标点（add_punc=True）时才懒加载。
+        # SenseVoice/Paraformer 组合内部已自带标点，当前路径恒为 add_punc=False，
+        # 无条件加载会每 chunk 多驻留一份 1.2GB 模型并最终段错误。改为惰性：
+        # add_punc=False 时永不触碰该模型。
+        punc_model = self._get_punc_model() if add_punc else None
         if add_punc and punc_model is not None:
             # 优先批量补标点，失败时仅退回逐条处理，避免单条失败拖垮整段。
             nonempty = [(i, t) for i, t in enumerate(cleaned) if t]

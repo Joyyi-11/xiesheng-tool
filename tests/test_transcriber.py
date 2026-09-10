@@ -5,6 +5,8 @@ pure helpers and the whole-audio cache so they run without downloading models.
 """
 
 from src.transcriber.funasr_transcriber import (
+    CHUNK_MARGIN,
+    CHUNK_SEC,
     FunASRTranscriber,
     _strip_sensevoice_tags,
 )
@@ -67,13 +69,22 @@ class TestModelValidation:
 
 
 class TestWholeAudioCache:
+    def test_forced_k_only_applies_to_chunked_path(self):
+        tr = FunASRTranscriber(model_name="sensevoice-small")
+        assert tr.can_force_num_speakers(CHUNK_SEC * CHUNK_MARGIN) is False
+        assert tr.can_force_num_speakers(CHUNK_SEC * CHUNK_MARGIN + 0.1) is True
+
     def test_save_then_load_roundtrip(self, tmp_path):
         tr = FunASRTranscriber(model_name="sensevoice-small")
         audio = tmp_path / "ep.wav"
         audio.write_bytes(b"x" * 2048)
         work = tmp_path / "work"
 
-        result = {"raw_text": "测试文本", "segments": [{"text": "测试文本", "start_time": 0.0, "end_time": 1.0}], "duration_sec": 1.0}
+        result = {
+            "raw_text": "测试文本",
+            "segments": [{"text": "测试文本", "start_time": 0.0, "end_time": 1.0}],
+            "duration_sec": 1.0,
+        }
         tr._save_cache(work, audio, "sensevoice-small", result)
         loaded = tr._load_cache(work, audio, "sensevoice-small")
         assert loaded == result

@@ -9,6 +9,7 @@ Usage:
 import argparse
 import json
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -21,8 +22,10 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 
 from src.audio import convert_to_wav, download_audio, get_duration_seconds
 from src.config import DEFAULT_LLM_PROVIDER, LLM_MODELS, get_llm_config, llm_configured
+from src.diarization.speaker_resolver import parse_stated_speaker_count
 from src.models.schemas import EpisodeInfo
 from src.processor import llm_processor
+from src.transcriber.funasr_transcriber import TranscriptResult
 from src.processor.normalize import normalize_quotes
 from src.processor.output_quality import assert_valid_output_doc
 from src.renderer.markdown import build_output_markdown
@@ -111,6 +114,73 @@ def emit_session_handoff(
     record_handoff(output_dir, url, episode.pub_date, json_path)
 
 
+def _backup_diarized(path: Path) -> None:
+    """覆盖 _diarized.txt 前备份原稿（仅首次，保留 CAM++ 原始产物供 A/B 与诊断）。
+
+    设计：只在 .bak 不存在时备份，保证多次 WeSpeaker 重跑后仍留存最初的 CAM++
+    原稿，而非被后续重跑覆盖。
+    """
+    if not path.exists():
+        return
+    bak = path.with_name(path.name + ".bak")
+    if bak.exists():
+        return
+    try:
+        shutil.copy(path, bak)
+        logger.info("已备份原稿（CAM++）到 %s", bak)
+    except OSError as e:
+        logger.warning("原稿备份失败（不影响主流程）：%s", e)
+
+
+def _finalize_labeling(labeled_segments, episode, output_dir, safe_name):
+    """确定性身份核验 + 写 _diarized.txt。返回 (transcript_text, spk_to_label, issues, labeled_path)。
+
+    抽出供三处复用：wespeaker 显式分支、auto 模式坍缩自动回退、--refresh-diarization 重跑。
+    """
+    from src.diarization.speaker_resolver import resolve_and_label
+    from src.diarization.speaker_diarization import format_labeled_segments
+
+    transcript_text = format_labeled_segments(labeled_segments)
+    labeled_segments, spk_to_label, resolve_issues = resolve_and_label(labeled_segments, episode.show_notes)
+    labeled_path = output_dir / f"{safe_name}_diarized.txt"
+    _backup_diarized(labeled_path)
+    labeled_path.write_text(
+        build_session_doc(episode, normalize_quotes(transcript_text)),
+        encoding="utf-8",
+    )
+    logger.info("带说话人标签的转录已保存到 %s", labeled_path)
+    if resolve_issues:
+        logger.warning("说话人命名告警：%s", "；".join(resolve_issues))
+    return transcript_text, spk_to_label, resolve_issues, labeled_path
+
+
+def _find_existing_wav(output_dir: Path, safe_name: str) -> Path | None:
+    """--refresh-diarization 时复用已有 WAV，跳过下载与转换。"""
+    p = output_dir / f"{safe_name}.wav"
+    return p if p.exists() else None
+
+
+def _load_segments_json(output_dir: Path, safe_name: str) -> list[dict] | None:
+    """--refresh-diarization 时复用首次转录持久化的原始 segments（text+timestamp，无 speaker）。"""
+    p = output_dir / f"{safe_name}_segments.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("读取 %s 失败：%s", p, e)
+        return None
+
+
+def _wespeaker_available() -> bool:
+    """WeSpeaker 后端依赖 diarize 是否可用（pyannote/torch 栈）。"""
+    try:
+        from diarize import diarize  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def process_episode(url, args, output_dir, tracker, transcriber, audio_override, llm_config) -> bool:
     """处理单个单集：抓取→下载→转录→整理。
 
@@ -119,6 +189,10 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
     链路），False 表示该期失败（批处理会继续下一期，不中断整体）。
     """
     timers: dict[str, float] = {}
+    # 新 flag 兜底：手工构造 args 的测试/caller 可能不传 refresh_diarization，
+    # 此处置默认 False，等价于 argparse 的默认行为，避免 AttributeError。
+    if not hasattr(args, "refresh_diarization"):
+        args.refresh_diarization = False
     try:
         # --- Step 1: Scrape ---
         with Timer() as t:
@@ -129,7 +203,7 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
         timers["scrape"] = t.elapsed
 
         # --- Cache short-circuit: same episode already processed ---
-        if not args.refresh:
+        if not (args.refresh or args.refresh_diarization):
             cached_md = find_cached_markdown(output_dir, url, episode.pub_date)
             if cached_md is not None:
                 print(f"\n[缓存命中] 该单集已处理过，直接返回既有结果: {cached_md}")
@@ -150,6 +224,16 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                     raise FileNotFoundError(f"找不到音频文件: {audio_override}")
                 logger.info("Step 2/6: 复用已有音频 %s", audio_override)
                 wav_file = audio_override
+            elif args.refresh_diarization:
+                # 廉价重跑：复用已存在的 WAV，跳过下载与转换（无 WAV 则回退下载）。
+                reused = _find_existing_wav(output_dir, safe_name)
+                if reused is None:
+                    logger.warning("未找到已有 WAV（%s.wav），回退到重新下载", safe_name)
+                    audio_file = download_audio(episode.audio_url, output_dir, stem=safe_name)
+                    wav_file = convert_to_wav(audio_file, output_dir, stem=safe_name)
+                else:
+                    logger.info("Step 2/6: --refresh-diarization 复用已有 WAV %s", reused)
+                    wav_file = reused
             else:
                 logger.info("Step 2/6: 下载音频...")
                 audio_file = download_audio(episode.audio_url, output_dir, stem=safe_name)
@@ -169,7 +253,16 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
 
         roster = parse_roster_with_roles(episode.show_notes)
         roster_names = [name for _, name in roster]
-        base_k = args.speakers if args.speakers else (len(roster) if len(roster) >= 2 else None)
+        # 圆桌/多人集花名册常被低估（散文并列名字、数词漏抓），用显式人数抬高 base_k。
+        stated_count = parse_stated_speaker_count(episode.show_notes)
+        if stated_count:
+            logger.info("Show Notes 显式人数信号：%d 位（花名册抓到 %d 位）", stated_count, len(roster))
+        if args.speakers:
+            base_k = args.speakers
+        else:
+            # stated_count 可能为 None（Show Notes 无显式人数），用 0 兜底再取 max。
+            k_candidate = max(len(roster), stated_count or 0)
+            base_k = k_candidate if k_candidate >= 2 else None
         if roster:
             logger.info(
                 "Step 3: Show Notes 识别到 %d 位说话人（%s），diarization K 锚点=%s",
@@ -184,7 +277,20 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
         merge_issues: list[str] = []
         can_force_k = transcriber.can_force_num_speakers(duration_sec)
         transcribe_elapsed = 0.0
-        if base_k and not args.no_diarization and can_force_k:
+        if args.refresh_diarization and not args.no_diarization:
+            # 廉价重跑：复用首次转录持久化的原始 segments，跳过 ASR，只重跑 diarization。
+            segments = _load_segments_json(output_dir, safe_name)
+            if segments is not None:
+                raw_text = "\n".join(s.get("text", "") for s in segments if s.get("text"))
+                transcript = TranscriptResult(
+                    raw_text=raw_text, segments=segments,
+                    duration_sec=duration_sec or 0.0, cost_yuan=0.0,
+                )
+                chosen_k = args.speakers or base_k
+                logger.info("Step 3/6: 复用已有转录（%d 段，跳过 ASR），仅重跑 diarization", len(segments))
+            else:
+                logger.warning("未找到 %s_segments.json，回退到重新转录", safe_name)
+        if transcript is None and base_k and not args.no_diarization and can_force_k and args.diarization != "wespeaker":
             for attempt_k in range(base_k, base_k + 4):
                 logger.info("Step 3/6: 本地转录中（FunASR %s, CPU, K=%d）...", args.model, attempt_k)
                 with Timer() as t:
@@ -213,19 +319,22 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                     "或用 --no-diarization 跳过自动分离后人工标注。"
                 )
         else:
-            if base_k and not args.no_diarization:
-                logger.info("短音频走整段转写路径，强制 K 不生效，跳过 K-retry")
-            logger.info("Step 3/6: 本地转录中（FunASR %s, CPU）...", args.model)
-            with Timer() as t:
-                transcript = transcriber.transcribe(
-                    wav_file, duration_sec,
-                    work_dir=output_dir / ".work" / safe_name,
-                    jobs=args.jobs, num_speakers=base_k,
-                    no_diarization=args.no_diarization,
-                )
-            transcribe_elapsed += t.elapsed
-            tracker.add_transcription(transcript.cost_yuan)
-            chosen_k = base_k
+            if transcript is not None:
+                pass  # --refresh-diarization 已加载转录，跳过重新转录
+            else:
+                if base_k and not args.no_diarization:
+                    logger.info("短音频走整段转写路径，强制 K 不生效，跳过 K-retry")
+                logger.info("Step 3/6: 本地转录中（FunASR %s, CPU）...", args.model)
+                with Timer() as t:
+                    transcript = transcriber.transcribe(
+                        wav_file, duration_sec,
+                        work_dir=output_dir / ".work" / safe_name,
+                        jobs=args.jobs, num_speakers=base_k,
+                        no_diarization=args.no_diarization,
+                    )
+                transcribe_elapsed += t.elapsed
+                tracker.add_transcription(transcript.cost_yuan)
+                chosen_k = base_k
 
         timers["transcribe"] = transcribe_elapsed
         char_count = len(transcript.raw_text)
@@ -234,13 +343,22 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
         print(f"  → 转录完成：{char_count} 字, {fmt_time(transcribe_elapsed)}, RTF={rtf:.2f}")
         print(f"  → [估算] 2小时节目约需 {fmt_time(est_2h)}（当前模型: {args.model}）")
         gate_note = ""
-        if base_k and not args.no_diarization:
+        if base_k and not args.no_diarization and not args.refresh_diarization:
             gate_note = "（质量门通过）" if not merge_issues else "（质量门告警·见上）"
         print(f"  → 说话人聚类 K={chosen_k}{gate_note}")
 
         raw_path = output_dir / f"{safe_name}_raw.txt"
         raw_path.write_text(transcript.raw_text, encoding="utf-8")
         logger.info("原始转录已保存到 %s", raw_path)
+        # 持久化原始 segments（text+timestamp，无 speaker），供 --refresh-diarization 廉价重跑复用。
+        if not args.refresh_diarization and transcript is not None:
+            seg_path = output_dir / f"{safe_name}_segments.json"
+            try:
+                seg_path.write_text(
+                    json.dumps(transcript.segments, ensure_ascii=False), encoding="utf-8"
+                )
+            except (OSError, TypeError) as e:
+                logger.warning("原始 segments 持久化失败（不影响主流程）：%s", e)
 
         # --- Step 4: 说话人标签 + 命名解析（独立于 LLM）---
         # SenseVoice 转写自带说话人标签（spk_model 一站式输出）时直接使用；
@@ -249,41 +367,89 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
         labeled_segments: list[dict] | None = None
         labeled_path = None
         resolve_issues: list[str] = []
+        spk_to_label: dict[str, str] = {}
         if not args.no_diarization:
-            with Timer() as t:
-                from src.diarization.speaker_diarization import format_labeled_segments
+            # 后端选择：auto 模式下圆桌/多人（base_k>=3）直接走 wespeaker，避免 cam++
+            # 系统性塌缩；--refresh-diarization 即「用 WeSpeaker 重分离」，强制 wespeaker。
+            if args.refresh_diarization:
+                effective_backend = "wespeaker"
+            elif args.diarization == "auto":
+                effective_backend = "wespeaker" if (base_k and base_k >= 3) else "campplus"
+                logger.info("Step 4 后端(auto)：base_k=%s → %s", base_k, effective_backend)
+            else:
+                effective_backend = args.diarization
 
-                has_spk = any(seg.get("speaker") for seg in transcript.segments)
-                if has_spk:
-                    logger.info("Step 4/6: 使用转写自带说话人标签（spk_model）...")
-                    labeled_segments = transcript.segments
-                else:
+            with Timer() as t:
+                if effective_backend == "wespeaker":
                     from src.diarization.speaker_diarization import (
                         assign_speakers,
                         run_diarization,
                     )
-
-                    logger.info("Step 4/6: 说话人日志（Speaker Diarization，独立模块）...")
+                    try:
+                        from diarize import diarize  # noqa: F401
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "wespeaker 后端需要 diarize 依赖但未安装："
+                            "请运行 pip install 'xiesheng[diarize]'（pyproject 已声明 diarize>=0.1.2）"
+                        ) from exc
+                    logger.info("Step 4/6: 说话人日志（WeSpeaker 外部 diarize，忽略转写自带标签）...")
                     diarization_segments = run_diarization(wav_file, num_speakers=chosen_k)
                     labeled_segments = assign_speakers(transcript.segments, diarization_segments)
+                else:
+                    has_spk = any(seg.get("speaker") for seg in transcript.segments)
+                    if has_spk:
+                        logger.info("Step 4/6: 使用转写自带说话人标签（spk_model）...")
+                        labeled_segments = transcript.segments
+                    else:
+                        from src.diarization.speaker_diarization import (
+                            assign_speakers,
+                            run_diarization,
+                        )
+                        logger.info("Step 4/6: 说话人日志（Speaker Diarization，独立模块）...")
+                        diarization_segments = run_diarization(wav_file, num_speakers=chosen_k)
+                        labeled_segments = assign_speakers(transcript.segments, diarization_segments)
                 try:
-                    # 原始 [SPEAKER_XX] 版（保持与历史/LLM 链路一致，供校订脚本逐段贴名）
-                    transcript_text = format_labeled_segments(labeled_segments)
-                    # 只做确定性身份核验；无证据的簇保留标签，交给人工或 LLM 校订。
-                    labeled_segments, spk_to_label, resolve_issues = resolve_and_label(labeled_segments, episode.show_notes)
-                    labeled_path = output_dir / f"{safe_name}_diarized.txt"
-                    labeled_path.write_text(
-                        build_session_doc(episode, normalize_quotes(transcript_text)),
-                        encoding="utf-8",
+                    transcript_text, spk_to_label, resolve_issues, labeled_path = _finalize_labeling(
+                        labeled_segments, episode, output_dir, safe_name
                     )
-                    logger.info("带说话人标签的转录已保存到 %s", labeled_path)
-                    if resolve_issues:
-                        logger.warning("说话人命名告警：%s", "；".join(resolve_issues))
                 except Exception as e:
                     logger.warning("说话人标签处理失败，跳过: %s", e)
                     transcript_text = transcript.raw_text
                     labeled_segments = None
+                    spk_to_label = {}
             timers["diarization"] = t.elapsed
+
+            # 塌缩检测：cam++（spk_model）在圆桌 3+ 人场景会系统性塌缩，此前靠肉眼
+            # 翻簇分布才偶然发现。auto 模式下命中即进程内自动回退 WeSpeaker（不重转录）。
+            if labeled_segments and effective_backend != "wespeaker":
+                from src.diarization.collapse_check import (
+                    detect_collapse,
+                    format_collapse_warning,
+                )
+
+                expected = max(len(roster), stated_count or 0) if (roster or stated_count) else None
+                collapse_reasons = detect_collapse(labeled_segments, expected_speakers=expected)
+                if collapse_reasons:
+                    collapse_msg = format_collapse_warning(collapse_reasons, url)
+                    logger.warning(collapse_msg)
+                    print(f"\n[告警] {collapse_msg}\n", file=sys.stderr)
+                    # A: auto 模式，cam++ 坍缩 → 进程内自动升 WeSpeaker 重跑 diarization（复用转录，不重 ASR）
+                    if args.diarization == "auto" and _wespeaker_available():
+                        logger.info("auto 模式：cam++ 坍缩，进程内自动回退 WeSpeaker 重跑 diarization...")
+                        try:
+                            from src.diarization.speaker_diarization import (
+                                assign_speakers,
+                                run_diarization,
+                            )
+                            diarization_segments = run_diarization(wav_file, num_speakers=chosen_k)
+                            new_labeled = assign_speakers(transcript.segments, diarization_segments)
+                            transcript_text, spk_to_label, resolve_issues, labeled_path = _finalize_labeling(
+                                new_labeled, episode, output_dir, safe_name
+                            )
+                            labeled_segments = new_labeled
+                            logger.info("auto 回退完成：已用 WeSpeaker 标签覆盖（原 CAM++ 稿存 .bak）")
+                        except Exception as e:
+                            logger.warning("auto 回退失败，保留 cam++ 结果：%s", e)
         else:
             logger.info("已跳过说话人分离（--no-diarization）")
 
@@ -398,6 +564,18 @@ def main() -> None:
     parser.add_argument("--no-llm", action="store_true",
                         help="[弃用] 等价于 --llm-mode session，后续版本移除")
     parser.add_argument("--no-diarization", action="store_true", help="跳过说话人日志，不区分说话人")
+    parser.add_argument(
+        "--diarization", choices=["campplus", "wespeaker", "auto"], default="campplus",
+        help="说话人分离后端：campplus=默认（SenseVoice spk_model 内嵌，零额外耗时）；"
+             "wespeaker=外部 WeSpeaker 独立 diarize（更稳，+7~11 分钟，需 pip install 'xiesheng[diarize]'）；"
+             "auto=按 Show Notes 人数自动选：圆桌/多人（>=3 人）走 wespeaker，否则 campplus，"
+             "且 cam++ 坍缩时进程内自动回退 wespeaker（不重转录）",
+    )
+    parser.add_argument(
+        "--refresh-diarization", action="store_true",
+        help="仅重跑说话人分离，复用已有转录与 WAV（跳过 ASR 重新下载/转写）。"
+             "用于 cam++ 塌缩后改用 WeSpeaker 重分离，比 --refresh 省一次 ASR。",
+    )
     parser.add_argument("--speakers", type=int, help="已知说话人数；默认自动检测")
     parser.add_argument(
         "--spk-max-seg-ms", type=int, default=4000,

@@ -59,7 +59,7 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 
 
 def test_session_rules_are_versioned():
-    assert SESSION_SPEC_VERSION == 19
+    assert SESSION_SPEC_VERSION == 22
 
 
 def test_build_session_prompt_wraps_package():
@@ -259,6 +259,28 @@ def test_validate_flags_speaker_label_mismatch():
     )
     problems = validate_session_output(bad)
     assert any("说话人标签错位" in p for p in problems)
+
+
+def test_validate_ignores_verbal_self_statement():
+    # 「我是通过了…」「我就是要先发」是本人口语自述而非自称他人姓名，
+    # 不应被启发式判成说话人标签错位（黄金时代集实测误报）。
+    ok = GOLDEN.replace(
+        "【嘉宾】谢谢，我最近在波士顿参加学术会议。",
+        "【嘉宾】谢谢，我是通过了，那个考试挺难；后来我就是要先发，先不管完不完美。",
+    )
+    problems = validate_session_output(ok)
+    assert not any("说话人标签错位" in p for p in problems)
+
+
+def test_validate_ignores_mbti_and_label_substring_self_name():
+    # ① 「我是 INFP」是性格自述；② 标签带未收录身份前缀（【课代表立正】）时
+    #    自称「我是立正」与标签一致，二者都不应判成标签错位。
+    ok = GOLDEN.replace(
+        "【嘉宾】谢谢，我最近在波士顿参加学术会议。",
+        "【课代表立正】谢谢，我是立正，我是 INFP，最近在波士顿参加学术会议。",
+    )
+    problems = validate_session_output(ok)
+    assert not any("说话人标签错位" in p for p in problems)
 
 
 def test_validate_flags_dunhao_between_quoted_items():

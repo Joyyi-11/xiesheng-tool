@@ -57,6 +57,109 @@ def _as_bold_question(text: str) -> str:
     return f"**{t}**"
 
 
+def _collect_bold_anchors(doc: OutputDoc) -> list[str]:
+    """收集原文转录区的回标锚点（用于加粗关键内容）。
+
+    锚点来源两类：
+    - 自动锚：核心观点的引用原话 quote（逐字摘录）、观点内术语 terms、术语表残留
+      keywords——这些词/句本身逐字来自原文，直接按文本匹配即可；
+    - 显式锚：核心观点句与问题句是提炼改写、无逐字原文，由 L3 提炼方在
+      KeyPoint.anchor / QuestionItem.anchor 中给出「转录区逐字存在的支撑句/短语」，
+      渲染时按它回标。
+    匹配原则：转录区**首次出现**处加粗（克制，避免满篇加粗淹没正文）；
+    锚点未在转录区出现（校订后措辞变化）时静默跳过，不报错、不改字。
+    长度克制：quote 若过长（>24 字）整句加粗会淹没正文，跳过；术语词条限 ≤12 字；
+    显式 anchor 限 ≤40 字（超出视为 L3 给错，跳过）。
+    """
+    anchors: list[str] = []
+    for kp in doc.key_points:
+        if kp.quote and kp.quote.strip() and len(kp.quote.strip()) <= 24:
+            anchors.append(kp.quote.strip())
+        if kp.anchor and kp.anchor.strip() and len(kp.anchor.strip()) <= 40:
+            anchors.append(kp.anchor.strip())
+        for term in kp.terms:
+            if term.term and term.term.strip() and len(term.term.strip()) <= 12:
+                anchors.append(term.term.strip())
+    for kw in doc.keywords:
+        if kw.key and kw.key.strip() and len(kw.key.strip()) <= 12:
+            anchors.append(kw.key.strip())
+    for q in doc.questions:
+        if q.anchor and q.anchor.strip() and len(q.anchor.strip()) <= 40:
+            anchors.append(q.anchor.strip())
+    # 去重且按长度降序：长锚先加粗，短锚（可能是长锚子串）不再叠加
+    seen: set[str] = set()
+    out: list[str] = []
+    for a in sorted(anchors, key=len, reverse=True):
+        a = a.strip()
+        if not a or a in seen:
+            continue
+        if len(a) < 2:  # 单字锚噪音大，忽略
+            continue
+        seen.add(a)
+        out.append(a)
+    return out
+
+
+def _apply_bold_anchors(transcript_md: str, anchors: list[str]) -> str:
+    """把锚点在转录文本的首次出现处加粗为 **锚点**。
+
+    只匹配【标签】之后的正文（每行标签如【swyx】不参与），避免把说话人标签误加粗；
+    同一锚点只在全文首次出现处加粗一次；已加粗区间内的子串不再二次加粗。
+    """
+    if not anchors:
+        return transcript_md
+
+    # 行级处理：把【标签】与正文分开，正文参与匹配
+    lines = transcript_md.split("\n")
+    bolded: set[str] = set()  # 已加粗过的锚（全局只加粗首次出现）
+    out_lines: list[str] = []
+    for line in lines:
+        m = re.match(r"^(\s*【[^】]*】)(.*)$", line)
+        label = m.group(1) if m else ""
+        body = m.group(2) if m else line
+        if not body.strip() or not body:
+            out_lines.append(line)
+            continue
+        # 该行内按锚长降序找首次出现位置（跳过已加粗区间）
+        spans: list[tuple[int, int, str]] = []
+        occupied: list[tuple[int, int]] = []
+        for a in anchors:
+            if a in bolded:
+                continue
+            idx = _find_first_free(body, a, occupied)
+            if idx is None:
+                continue
+            spans.append((idx, idx + len(a), a))
+            occupied.append((idx, idx + len(a)))
+            bolded.add(a)  # 全局首次出现即锁定，后文不再重复加粗
+        if not spans:
+            out_lines.append(line)
+            continue
+        # 从右往左插入 **，避免破坏后续偏移
+        spans.sort(reverse=True)
+        new_body = body
+        for start, end, a in spans:
+            new_body = new_body[:end] + "**" + new_body[end:]
+            new_body = new_body[:start] + "**" + new_body[start:]
+        out_lines.append(label + new_body if label else new_body)
+    return "\n".join(out_lines)
+
+
+def _find_first_free(text: str, needle: str, occupied: list[tuple[int, int]]) -> int | None:
+    """在 text 中找 needle 首次出现、且不与 occupied 区间重叠的位置（-1 表示无）。"""
+    if not needle:
+        return None
+    start = 0
+    while True:
+        idx = text.find(needle, start)
+        if idx < 0:
+            return None
+        end = idx + len(needle)
+        if all(end <= o_start or idx >= o_end for o_start, o_end in occupied):
+            return idx
+        start = idx + 1
+
+
 def fmt_ts(sec: float | None) -> str:
     """Format a start timestamp as ``MM:SS`` or ``H:MM:SS``."""
     if sec is None:
@@ -127,7 +230,10 @@ def build_output_markdown(doc: OutputDoc) -> str:
 
     # 同一说话人的相邻段落在渲染时确定性合并（脚本保证，不依赖 LLM）：源转录按停顿
     # 切碎、且同一人常被 diarization 判成多个簇，合并后才是「一人一段」的可读形态。
-    lines += ["", TRANSCRIPT_HEADING, "", merge_same_speaker_blocks(doc.full_text)]
+    # 合并后再做回标加粗：术语/金句/观点支撑句首次出现处加粗，未命中静默跳过。
+    transcript_md = merge_same_speaker_blocks(doc.full_text)
+    transcript_md = _apply_bold_anchors(transcript_md, _collect_bold_anchors(doc))
+    lines += ["", TRANSCRIPT_HEADING, "", transcript_md]
 
     footer = _build_footer(doc)
     if footer:
@@ -168,6 +274,7 @@ def _doc_from_dict(data: dict) -> OutputDoc:
                 point=kp.get("point", ""),
                 evidence=kp.get("evidence", ""),
                 quote=kp.get("quote", ""),
+                anchor=kp.get("anchor", ""),
                 terms=[
                     TermDef(term=t.get("term", ""), desc=t.get("desc", ""))
                     for t in kp.get("terms", [])
@@ -180,7 +287,11 @@ def _doc_from_dict(data: dict) -> OutputDoc:
         keywords=[Keyword(key=kw.get("key", ""), desc=kw.get("desc", "")) for kw in data.get("keywords", [])],
         summary=data.get("summary", ""),
         questions=[
-            QuestionItem(question=q.get("question", ""), answer=q.get("answer", ""))
+            QuestionItem(
+                question=q.get("question", ""),
+                answer=q.get("answer", ""),
+                anchor=q.get("anchor", ""),
+            )
             for q in data.get("questions", [])
         ],
         costs=data.get("costs", {}) or {},
