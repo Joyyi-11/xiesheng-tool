@@ -57,12 +57,12 @@ from src.processor.rules import (  # noqa: E402
 # 转录小节标题一律引用 src.utils.TRANSCRIPT_HEADING，禁止字面量硬编码。
 SESSION_SPEC_VERSION = RULES_SPEC_VERSION
 
+# 术语表为可选小节（v23）：不在必备清单内——无符合标准的残留硬术语时整节不输出。
 REQUIRED_HEADINGS = (
     "## Show Notes",
     "## 摘要",
     "## 核心观点",
     "## 问题与思考",
-    "## 术语表",
     "## 人物简介",
     TRANSCRIPT_HEADING,
 )
@@ -117,9 +117,14 @@ def _build_session_rules() -> str:
 
 ## 核心观点
 
-- **观点句。** 展开论述句（1-2 句）「值得单独收录的原话」
+- **观点句。**展开论述句（1-2 句）「值得单独收录的原话」
   - **观点内特有术语**：1-2 句就近解释。
 （{STRUCT_KEY_POINT}）
+
+## 术语表
+
+- **残留术语**：1-2 句解释。
+（{STRUCT_GLOSSARY}——**本节可选**：无符合标准的残留硬术语时整节不输出、不要留空标题）
 
 ## 问题与思考
 
@@ -129,14 +134,9 @@ def _build_session_rules() -> str:
 
 （用 1. 2. 3. 编号，**序号写在加粗外、问题整句加粗**（`1. **问题？**`），问题单独占一行、以问号结尾，换行后另起一行写答案且答案不加粗。{STRUCT_QUESTIONS}）
 
-## 术语表
-
-- **残留术语**：1-2 句解释。
-（{STRUCT_GLOSSARY}）
-
 ## 人物简介
 
-**身份姓名**：简介
+**姓名**：简介
 （{STRUCT_INTRO}）
 
 {TRANSCRIPT_HEADING}
@@ -260,8 +260,7 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
                 continue
             actual = alias
         body = sections[actual].strip()
-        if not body and heading != "## 术语表":
-            # 术语表为「残留术语」区：允许 0 条（标题仍需存在，见上）
+        if not body:
             problems.append(f"小节为空：{heading}")
 
     # 来源行：须含播客名 | 节目标题 | 日期 三要素（在标题后、首个 ## 前）
@@ -287,16 +286,30 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
         problems.append("核心观点中存在未加粗的条目（每条要点须以 **加粗主题句** 开头）")
 
     # 核心观点：禁止「**观点句**：展开」的框架式冒号（v17）——本节是「观点句、
-    # 展开论述句、引用句」三段顺次相接，主题句以句号收尾后直接空格接展开句。
+    # 展开论述句、引用句」三段顺次相接，主题句以句号收尾后直接接展开句、不留空格。
     # 缩进的术语子条目（  - **术语**：解释）是定义式标签，不受本条限制。
     for _kp_line in kp_lines:
         if re.match(r"^-\s+\*\*.+?\*\*\s*[:：]", _kp_line):
             problems.append(
                 "核心观点主题句后不应使用冒号引出展开（如「**观点句**：展开」），"
-                "应改为「**观点句。** 展开论述句「引用句」」三段顺次相接、空格分隔"
+                "应改为「**观点句。**展开论述句「引用句」」三段顺次相接、不留空格"
                 "（主题句内部必要冒号可保留，但整句须以句号收尾）"
             )
             break
+
+    # 核心观点：引用原话必须内联在条目末尾（v23）——不得单独成行或用 > 引用块。
+    # 单独拆出会让读者重看一遍，且常与观点句/展开句重复，故一律要求合并进条目。
+    for _kp_line in kp_lines:
+        if re.match(r"^\s*>\s*\S", _kp_line):
+            problems.append(
+                "核心观点的引用原话应内联在观点条目末尾（紧接展开句、用直角引号「」包裹、"
+                "不留空格），不得单独成行或使用 > 引用块"
+            )
+            break
+    if any(re.match(r"^\s*[「『].*[」』]\s*$", _ln) for _ln in kp_lines):
+        problems.append(
+            "核心观点中出现整行仅为引号句的行：应把原话内联到所属观点条目末尾，不单独成行"
+        )
 
     # 问题与思考：1. 2. 编号、问答分行，禁用带圈数字 ①②③ 与同行「**问题？** 答案」
     qt_body = sections.get("## 问题与思考", "")
@@ -324,7 +337,14 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
                 problems.append("问题与思考的答案不应以新问号结尾（须直接解答该问题，勿把问题抛回读者）")
                 break
 
-    # 术语表：残留术语 0 起（不强制条数），有条目时每项为 **术语**：解释，且解释以句号结尾
+    # 术语表为可选小节（v23）：若出现，位置须在核心观点之后、问题与思考之前；
+    # 无符合标准的残留硬术语时整节不输出（不在必备清单内，缺省不算错）。
+    if "## 术语表" in sections:
+        _sec_order = [h for h in sections if h in ("## 核心观点", "## 术语表", "## 问题与思考")]
+        if _sec_order != ["## 核心观点", "## 术语表", "## 问题与思考"]:
+            problems.append("术语表位置错误：应紧跟在核心观点之后、问题与思考之前")
+
+    # 术语表：有条目时每项为 **术语**：解释，且解释以句号结尾
     terms = [line for line in sections.get("## 术语表", "").splitlines() if line.strip().startswith("- ")]
     if terms:
         if not all(re.search(r"\*\*.+?\*\*[:：]", item) for item in terms):
@@ -349,6 +369,12 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
     transcript = get_transcript_body(sections)
     if re.search(r"^\s*\*\*.+?\*\*[:：]", transcript, re.MULTILINE):
         problems.append("原文转录说话人应使用中文方括号【身份姓名】，不要用 **加粗**：样式")
+    # 原文转录：回标加粗（v23 硬要求）——转录区至少有一处加粗回标，便于定位关键内容
+    if transcript and "**" not in transcript:
+        problems.append(
+            "原文转录区没有任何加粗回标：须把核心观点的引用原话与术语在转录区首次出现处加粗"
+            "（会话链路可用 `python -m src.processor.bold_anchors <md> --apply` 确定性回标）"
+        )
     # 原文转录：不得残留未映射的 SPEAKER 标签（混段无法可靠拆分时可保留，但需人工复核）
     leftover = SPEAKER_LABEL_RE.findall(transcript)
     if leftover:
