@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 先读 README 的「限制」
+    url: https://github.com/Joyyi-11/xiesheng-tool#%E9%99%90%E5%88%B6
+    about: 本地 ASR 在 CPU 上跑的耗时量级、说话人区分在多人圆桌场景的已知边界，以及哪些输入不属于本工具的适用范围。
+  - name: 校订口径与输出结构改动，请先开 issue
+    url: https://github.com/Joyyi-11/xiesheng-tool/blob/main/CONTRIBUTING.md#%E4%B8%A4%E6%9D%A1%E9%93%BE%E8%B7%AF%E4%B8%80%E5%A5%97%E5%8F%A3%E5%BE%84
+    about: src/processor/rules.py 是两条链路共享的口径源，改动需同步回维护者的私有源；直接提 PR 会让两边分叉。

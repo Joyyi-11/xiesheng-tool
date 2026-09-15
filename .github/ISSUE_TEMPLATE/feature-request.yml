@@ -1,0 +1,51 @@
+name: 功能建议
+description: 新的输入来源、ASR 后端、输出格式、校订口径调整等建议
+title: "[建议] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **校订口径（`src/processor/rules.py`）与输出结构的调整请走本模板，不要直接提 PR**——
+        这两处由两条链路共享，且要同步回维护者的私有源。提案先在这里讨论清楚，落地由维护者执行。
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 建议类型
+      options:
+        - 校订口径调整（错字、标点、重复、断句等判定标准）
+        - 输出结构或板块调整
+        - 新增 ASR / 说话人后端
+        - 新增输入来源（非小宇宙平台）
+        - 校订质量校验或提示
+        - 性能、内存、缓存
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 你的场景
+      description: 你拿撷声处理什么样的音频、卡在哪一步
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: 现有做法不够在哪
+      description: 尽量用实际例子说明现状，而不是描述理想状态
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的改变
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoff
+    attributes:
+      label: 可能的代价
+      description: 例如会不会影响另一条链路的输出、是否需要新增依赖
+    validations:
+      required: false

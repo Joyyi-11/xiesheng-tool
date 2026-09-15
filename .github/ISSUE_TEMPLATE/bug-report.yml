@@ -1,0 +1,61 @@
+name: 程序问题
+description: 崩溃、报错、缓存异常、CLI 参数行为不符预期等非转录内容问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        报告转录内容本身的问题（错字、专名、标点、说话人）请用「转录质量问题」模板。
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 出问题的阶段
+      options:
+        - 抓取元信息或下载音频
+        - 本地转写（ASR）
+        - 说话人区分
+        - LLM 校订（api 链路）
+        - 会话内校订（session 链路）
+        - 渲染输出
+        - 缓存或断点续跑
+        - 不确定
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: 运行的命令
+      placeholder: 例如 python -m src.main --llm-mode session --jobs 1 <url>
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 报错信息或异常表现；退出码非 0 时请一并写出
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: 相关日志
+      description: 崩溃或报错前的最后若干行
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: env
+    attributes:
+      label: 运行环境
+      description: 操作系统、Python 版本、是否 CPU 运行
+      placeholder: 例如 Windows 11 / Python 3.11 / 纯 CPU
+    validations:
+      required: false

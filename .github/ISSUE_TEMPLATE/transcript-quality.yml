@@ -1,0 +1,72 @@
+name: 转录质量问题
+description: 转写或校订结果出现专名错误、同音错字、标点异常、重复字、说话人归属错误等
+title: "[转录质量] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        转录质量问题请尽量附**可复核的原文片段**。同一段音频能回听，才能判断问题落在本地 ASR 识别还是 LLM 校订层——
+        这两层的修法完全不同。区分方式见 CONTRIBUTING.md 的「转录质量问题」一节。
+  - type: dropdown
+    id: category
+    attributes:
+      label: 问题类型
+      options:
+        - 专名错误（人名 / 产品名 / 机构名被识别成别的字）
+        - 同音错字（普通词汇听错）
+        - 标点异常（半角标点、断句、缺失标点）
+        - 重复字词（口吃、连续重复）
+        - 说话人归属错误（标签贴错人或被并段）
+        - 内容缺失或被改写
+        - 其他
+    validations:
+      required: true
+  - type: input
+    id: episode
+    attributes:
+      label: 节目与位置
+      description: 节目链接，或音频时间点（如 12:30 附近）
+      placeholder: 例如 https://www.xiaoyuzhoufm.com/episode/xxx ，约 01:12:30
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际输出
+      description: 逐字粘贴出问题的那一段，保留【说话人】标签，不要改写
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望输出
+      description: 你认为正确的内容
+    validations:
+      required: true
+  - type: dropdown
+    id: audio_public
+    attributes:
+      label: 原始音频可否复核
+      options:
+        - 可以，节目公开可听
+        - 可以，但需要我提供片段
+        - 不便提供
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: 运行方式
+      description: ASR 模型与后处理链路
+      placeholder: 例如 sensevoice-small + --llm-mode session
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充说明
+      description: 是否稳定复现、是否在你的其他节目里也出现、大致规模（偶发还是成片）
+    validations:
+      required: false
