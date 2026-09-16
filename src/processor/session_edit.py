@@ -456,6 +456,27 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
                 "可用 src.utils.merge_same_speaker_blocks 确定性合并"
             )
 
+    # 原文转录：半角标点与 ≥3 连重复字必须为 0（v24，确定性规则硬闸门）
+    # 背景（2026-09-15 公开仓 issue #1 / #2）：这两条规则此前只活在提示词层、或散落在
+    # 每集复制的 oneoff 脚本里，实测随脚本复制而漂移——带 en_punct 的集残留 0 处，
+    # 未带的 Vol.1 残留 91 处、#651 残留 74 处。现由确定性脚本兜底
+    # （src.processor.normalize），校验器在此复核，防止「LLM 长文漏执行」与
+    # 「脚本漂移」两类复发。先剥掉 ** 再扫，避免已回标加粗的稿子被 ** 隔断而漏检。
+    if transcript:
+        from src.processor.normalize import count_text
+
+        _n_en, _n_rp = count_text(transcript.replace("**", ""))
+        if _n_en:
+            problems.append(
+                f"原文转录区残留 {_n_en} 处外文词后的半角标点（应转中文全角）。"
+                "确定性修复：`python -m src.processor.normalize <md> --apply`"
+            )
+        if _n_rp:
+            problems.append(
+                f"原文转录区残留 {_n_rp} 处 ≥3 连重复字（应合并为一个；2 连与拟声、应答叠用保留）。"
+                "确定性修复：`python -m src.processor.normalize <md> --apply`"
+            )
+
     if source_text and transcript:
         # 比率只比「正文内容」，先把说话人标签（[SPEAKER_XX] / 【姓名】）与空白剥掉，
         # 否则 diarized 源里 1229 个冗长 [SPEAKER_XX] 标签会把分母虚高近一倍，造成假阳性。

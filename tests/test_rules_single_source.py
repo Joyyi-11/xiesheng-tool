@@ -46,7 +46,34 @@ def test_struct_key_point_mentions_opening_as_source_material():
 def test_versions_track_shared_rules_version():
     # session 版本号引用 rules；api 的 CLEAN/STRUCT 缓存版本同源（见 llm_processor）
     assert SESSION_SPEC_VERSION == rules.RULES_SPEC_VERSION
-    assert rules.RULES_SPEC_VERSION == 22
+    assert rules.RULES_SPEC_VERSION == 24
+
+
+def test_en_punct_and_repeat_rules_are_deterministic_backed():
+    """v24：半角标点与 ≥3 连重复字两条须写明「由确定性脚本兜底」。
+
+    回归背景（2026-09-15 公开仓 issue #1 / #2）：两条规则原文只写在提示词层，
+    实测随每集复制的 oneoff 校订脚本漂移——带 en_punct 的集残留 0 处、未带的
+    Vol.1 残留 91 处。条款须显式指向 src.processor.normalize，否则又会退回
+    「指望 LLM 在长文里自觉执行」。
+    """
+    assert "src.processor.normalize" in rules.EDIT_EN_PUNCT
+    assert "src.processor.normalize" in rules.EDIT_REDO
+    # 两条都得进共享总表并抵达会话链路
+    assert rules.EDIT_EN_PUNCT in rules.EDIT_RULES
+    assert rules.EDIT_REDO in rules.EDIT_RULES
+    assert "src.processor.normalize" in SESSION_RULES
+
+
+def test_fidelity_allows_filler_removal_with_conservation_judge():
+    """v24：EDIT_FIDELITY 必须开出「删口语噪音」例外口，且带信息量守恒判据。
+
+    回归背景（issue #2）：原文三条互相打架——FIDELITY 只准修正错字（堵住删噪）、
+    FILLER 授权删除、REDO 把「重写表达」明确禁止。开了口子就必须同时给判据，
+    否则会滑向「为通顺而压缩概要」。
+    """
+    assert "口语噪音" in rules.EDIT_FIDELITY
+    assert "信息量守恒" in rules.EDIT_FIDELITY
 
 
 def test_anchor_rule_reaches_both_links():
@@ -55,17 +82,17 @@ def test_anchor_rule_reaches_both_links():
     回归背景：STRUCT_ANCHORS 曾被当作「未使用 import」从 session_edit 清理掉，
     导致会话链路完全没有回标加粗口径（quote 又是润色版、逐字匹配必然失败）。
     """
-    assert "回标锚点" in rules.STRUCT_ANCHORS
+    assert "回标加粗" in rules.STRUCT_ANCHORS
     # 锚点必须是原文逐字子串（这是回标能命中的前提）
-    assert "逐字存在的原文子串" in rules.STRUCT_ANCHORS
+    assert "逐字存在" in rules.STRUCT_ANCHORS
     # 两链路都得有：api 走 STRUCT 提示词，session 走 SESSION_RULES
-    assert "回标锚点" in STRUCT_SYSTEM_PROMPT
-    assert "回标锚点" in SESSION_RULES
+    assert "回标加粗" in STRUCT_SYSTEM_PROMPT
+    assert "回标加粗" in SESSION_RULES
     # 共享条款必须机制中立（不得只描述 api 的渲染层实现）
     assert "渲染层" not in rules.STRUCT_ANCHORS
-    # 但须说明两链路落地等价，避免会话链路不知道该就地加粗
-    assert "就地加粗" in rules.STRUCT_ANCHORS
-    assert "就地加粗" in SESSION_RULES
+    # 但须说明两链路落地等价（会话链路改用确定性回标脚本，不再靠 LLM 自觉加粗）
+    assert "bold_anchors" in rules.STRUCT_ANCHORS
+    assert "bold_anchors" in SESSION_RULES
 
 
 def test_session_rules_embed_shared_edit_rules_textually():
@@ -84,6 +111,6 @@ def test_struct_rules_reach_session_structure_section():
         "观点句必须是完整陈述句",
         "首次出现须写明「姓名（身份/头衔）」",
         "排除播客名、节目名、嘉宾姓名、平台名",
-        "正文格式（**身份姓名**：简介）",
+        "正文格式（**姓名**：简介）",
     ):
         assert text in SESSION_RULES

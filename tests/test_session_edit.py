@@ -23,9 +23,17 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 
 ## 核心观点
 
-- **中国团队坚持开源大模型。** 但缺乏数据分发。
-- **模型塌缩不可避免。** 关键在于对 AI 数据的筛选。
-- **AI 无法替代人类品味。** 目前 AI 更需要的是 harness。
+- **中国团队坚持开源大模型。**但缺乏数据分发。
+- **模型塌缩不可避免。**关键在于对 AI 数据的筛选。
+- **AI 无法替代人类品味。**目前 AI 更需要的是 harness。
+
+## 术语表
+
+- **数据飞轮**：开源模型无法从用户回流数据的结构性缺陷。
+- **模型塌缩**：AI 用生成数据训练导致能力退化的现象。
+- **认知负债**：过度依赖 AI 导致思考能力下降。
+- **主权 AI**：各国训练符合自身价值观的大模型。
+- **品味（Taste）**：人类定义问题与指引优化的能力。
 
 ## 问题与思考
 
@@ -37,14 +45,6 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 
    关键在于对生成数据做质量过滤与多样性控制，维持多样性。
 
-## 术语表
-
-- **数据飞轮**：开源模型无法从用户回流数据的结构性缺陷。
-- **模型塌缩**：AI 用生成数据训练导致能力退化的现象。
-- **认知负债**：过度依赖 AI 导致思考能力下降。
-- **主权 AI**：各国训练符合自身价值观的大模型。
-- **品味（Taste）**：人类定义问题与指引优化的能力。
-
 ## 人物简介
 
 **主播**：大卫翁，播客主理人
@@ -55,11 +55,13 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 【主播】大家好，欢迎来到我的博客节目。
 
 【嘉宾】谢谢，我最近在波士顿参加学术会议。
+
+【嘉宾】这期我们重点聊**数据飞轮**。
 """
 
 
 def test_session_rules_are_versioned():
-    assert SESSION_SPEC_VERSION == 22
+    assert SESSION_SPEC_VERSION == 24
 
 
 def test_build_session_prompt_wraps_package():
@@ -138,7 +140,7 @@ def test_validate_accepts_none_speaker_intro():
 def test_validate_rejects_colon_after_key_point_topic():
     # 核心观点三段式：观点句、展开论述句、引用句顺次相接，主题句后不得用冒号引出展开
     bad = GOLDEN.replace(
-        "- **模型塌缩不可避免。** 关键在于对 AI 数据的筛选。",
+        "- **模型塌缩不可避免。**关键在于对 AI 数据的筛选。",
         "- **模型塌缩不可避免**：关键在于对 AI 数据的筛选。",
     )
     problems = validate_session_output(bad)
@@ -148,8 +150,8 @@ def test_validate_rejects_colon_after_key_point_topic():
 def test_validate_allows_colon_inside_key_point_topic():
     # 主题句内部必要冒号可保留（如「第三个时代：常驻同事」），整句仍以句号收尾
     ok = GOLDEN.replace(
-        "- **模型塌缩不可避免。** 关键在于对 AI 数据的筛选。",
-        "- **AI 产品的第三个时代：常驻同事。** 关键在于对 AI 数据的筛选。",
+        "- **模型塌缩不可避免。**关键在于对 AI 数据的筛选。",
+        "- **AI 产品的第三个时代：常驻同事。**关键在于对 AI 数据的筛选。",
     )
     assert validate_session_output(ok) == []
 
@@ -331,6 +333,35 @@ def test_session_rules_require_same_speaker_merge():
     assert "同一说话人的相邻段落必须合并为一段" in SESSION_RULES
 
 
+def test_validate_rejects_halfwidth_punct_in_transcript():
+    """v24 硬闸门：转录区残留外文词后半角标点须报错（公开仓 issue #1）。
+
+    回归背景：EDIT_EN_PUNCT 只活在提示词层，实测随每集 oneoff 脚本漂移——
+    带 en_punct 的集残留 0 处、未带的 Vol.1 残留 91 处。现由确定性脚本兜底，
+    校验器在此复核，防止「LLM 长文漏执行」这类问题复发。
+    """
+    md = GOLDEN.replace("这期我们重点聊", "这个 agent, 我们重点聊")
+    problems = validate_session_output(md)
+    assert any("半角标点" in p for p in problems)
+    assert any("src.processor.normalize" in p for p in problems)
+
+
+def test_validate_rejects_triple_repeat_in_transcript():
+    """v24 硬闸门：转录区残留 ≥3 连重复字须报错（公开仓 issue #2）。
+
+    2 连（刚刚 / 看看）必须有正常叠词，一律保留，故只拦 ≥3 连。
+    """
+    md = GOLDEN.replace("大家好", "你你你好")
+    problems = validate_session_output(md)
+    assert any("≥3 连重复字" in p for p in problems)
+
+
+def test_validate_keeps_onomatopoeia_and_interjection_repeats():
+    """拟声笑声（哈哈哈）与应答叠用（对对对）属正常用法，不得被判为重复字问题。"""
+    md = GOLDEN.replace("谢谢，我最近", "哈哈哈，对对对，我最近")
+    assert validate_session_output(md) == []
+
+
 def test_session_rules_warn_mid_phrase_period():
     # 校订规则须提示「连贯短语中途被句号切断」类断句错误
     assert "好不好找工作" in SESSION_RULES
@@ -350,12 +381,12 @@ def test_transcript_heading_is_single_source():
 
 
 def test_required_headings_are_exported():
+    # 术语表为可选小节（v23）：不在必备清单内
     assert REQUIRED_HEADINGS == (
         "## Show Notes",
         "## 摘要",
         "## 核心观点",
         "## 问题与思考",
-        "## 术语表",
         "## 人物简介",
         "## 原文转录",
     )
