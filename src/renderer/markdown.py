@@ -123,6 +123,12 @@ def _apply_bold_anchors(transcript_md: str, anchors: list[str]) -> str:
         # 该行内按锚长降序找首次出现位置（跳过已加粗区间）
         spans: list[tuple[int, int, str]] = []
         occupied: list[tuple[int, int]] = []
+        # 正文里**已存在的** `**...**` 视为已加粗：占位并记入 bolded，使本函数幂等。
+        # 根因：会话链路交付前要跑 `bold_anchors --apply`，若成稿已由渲染器回标过，
+        # 二次执行会把 `**锚点**` 再包一层变成 `****锚点****`（实测 25 处）。
+        for _bm in re.finditer(r"\*\*([^*]+)\*\*", body):
+            occupied.append((_bm.start(), _bm.end()))
+            bolded.add(_bm.group(1))
         for a in anchors:
             if a in bolded:
                 continue
@@ -191,15 +197,14 @@ def build_output_markdown(doc: OutputDoc) -> str:
 
     lines += ["", "## 核心观点", ""]
     for kp in doc.key_points:
-        # 结构＝观点句、展开论述句、引用句，三段顺次相接，中间用空格、
-        # 不用冒号（旧的「**观点句**：展开」是本节冒号泛滥的主因，v17 起废止）。
+        # 结构＝观点句、展开论述句、引用句，三段顺次相接、**彼此不留空格**（中文表述
+        # 无需空格；旧「**观点句**：展开」的框架式冒号是本节泛滥主因，v17 起废止）。
         line = f"- **{_as_sentence(kp.point)}**"
         if kp.evidence:
-            line += f" {_as_sentence(kp.evidence)}"
+            line += _as_sentence(kp.evidence)
         if kp.quote:
-            # 原文佐证行内化：直接跟在展开句后，用直角引号包裹，不单独成引用块；
-            # 展开句已以句号收尾，句号后不再留空格（无展开句时与观点句间留一空格）
-            line += f"{'' if kp.evidence else ' '}「{kp.quote}」"
+            # 原文佐证行内化：紧接展开句之后、直角引号包裹、不留空格，不单独成引用块
+            line += f"「{kp.quote}」"
         lines.append(line)
         for term in kp.terms:
             desc = (term.desc or "").strip()
@@ -207,6 +212,17 @@ def build_output_markdown(doc: OutputDoc) -> str:
                 desc += "。"
             sep = "：" if desc else ""
             lines.append(f"  - **{term.term}**{sep}{desc}")
+
+    # 术语表为可选小节（v23）：仅在确有「无法就近挂到核心观点下」的残留硬术语时出现，
+    # 位置紧跟核心观点之后；无则不输出该小节（不再固定占位）。
+    if doc.keywords:
+        lines += ["", "## 术语表", ""]
+        for kw in doc.keywords:
+            desc = (kw.desc or "").strip()
+            if desc and not desc.endswith(("。", ".")):
+                desc += "。"
+            sep = "：" if desc else ""
+            lines.append(f"- **{kw.key}**{sep}{desc}")
 
     lines += ["", "## 问题与思考", ""]
     for i, q in enumerate(doc.questions, 1):
@@ -217,14 +233,6 @@ def build_output_markdown(doc: OutputDoc) -> str:
             lines.append(f"   {q.answer}")
         if i < len(doc.questions):
             lines.append("")
-
-    lines += ["", "## 术语表", ""]
-    for kw in doc.keywords:
-        desc = (kw.desc or "").strip()
-        if desc and not desc.endswith(("。", ".")):
-            desc += "。"
-        sep = "：" if desc else ""
-        lines.append(f"- **{kw.key}**{sep}{desc}")
 
     lines += ["", "## 人物简介", "", doc.speaker_intro or "（无）"]
 
