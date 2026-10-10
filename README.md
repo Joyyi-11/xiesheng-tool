@@ -19,6 +19,7 @@
 - 千问或 DeepSeek 分块校订：错字修正、口语清理、语义分段、专名纠错（分块并行校订）
 - LLM 模型自动回退：按 `--llm-model` 候选列表（逗号分隔）或网关 `/models` 自动选可用模型，404 `model_not_found` 不再白白重试，过载（429/502/503）指数退避
 - 会话内校订固化：`python -m src.processor.session_edit <episode>_diarized.txt` 输出固定规范提示词，附带结构校验器保证输出格式稳定
+- 说话人人数预检（`probe`）：分离前跑 VAD + speaker embedding 多 K 轮廓系数扫描，按声学可分性决定后端与人数——避免 cam++ 把双人访谈塌缩成一簇；需要 `pip install '.[diarize]'`，不可用时自动回退 cam++ 并由塌缩检测兜底
 - 独立生成摘要、核心观点、问题与思考、术语表等阅读辅助信息，避免长文输出截断
 - 永久保留原始转录，整段音频缓存支持失败后续跑
 - 按模型、来源 hash 和提示词版本隔离缓存，避免失败重跑或改提示词后重复消耗 LLM token
@@ -37,7 +38,7 @@
 
 ① 抓取元信息与音频：抓取标题／来源／Show Notes／音频地址，并下载音频
 ② 本地转写：FunASR SenseVoice-Small 本地转写，保留原始逐字稿
-③ 说话人区分：为不同声音添加标签
+③ 说话人区分：分离前先做人数预检（多 K 轮廓系数扫描）决定后端与人数，再为不同声音添加标签
 ④ LLM 分块校订：分块修正错字、口语、专名、分段（会话内链路产出输入包，API 链路自动校订，含重试／回退）
 ⑤ 内容提炼：生成摘要、核心观点、问题与思考、术语表等阅读辅助信息
 ⑥ Markdown 组装：按固定结构写入
@@ -213,7 +214,9 @@ LLM_BASE_URL=https://your-provider/v1
 | `--speakers` | 自动检测 | 明确指定说话人数 |
 | `--llm-mode {api,session}` | 否 | LLM 执行方式：`api`=调 API Key 自动化校订，`session`=会话内由 agent 校订（按会话积分计费，同样要付费）；默认自动检测：有 Key→api，无→session；`--no-llm` 为弃用别名，等价于 `session` |
 | `--no-diarization` | 否 | 跳过说话人识别 |
-| `--diarization {campplus,wespeaker,auto}` | `campplus` | 说话人分离后端：`campplus`=SenseVoice 自带 cam++（零额外成本，2-3 人清晰对谈最优）；`wespeaker`=外部 diarize 全局 embedding，圆桌/塌缩更稳但单集 +7~11 分钟；`auto`=按花名册/自报人数自动选（≥3 人或圆桌走 wespeaker，否则 cam++） |
+| `--diarization {campplus,wespeaker,auto}` | `auto` | 说话人分离后端：`campplus`=SenseVoice 自带 cam++（零额外成本）；`wespeaker`=外部 diarize 全局 embedding，圆桌/塌缩更稳但需显式给人数（配合 `--speakers`）；`auto`=**默认**，分离前先跑人数预检 `probe`（VAD + speaker embedding + 多 K 轮廓系数扫描），按声学可分性决定后端与人数，预检不可用时保守回退 cam++ |
+| `--diarization campplus --no-probe` | 否 | 跳过人数预检，退回按 Show Notes 人数判据选后端 |
+| `--probe-sample-ratio` | `0.25` | 预检时的 VAD 段抽样比例：越低越快，长音频（>2h）可调到 `0.1`–`0.15` |
 | `--refresh-diarization` | 否 | 仅重跑说话人分离，复用已持久化的转录结果、不重跑 ASR（替代旧的 `--refresh --diarization wespeaker` 全量重转录；原 cam++ 稿自动 `.bak` 备份） |
 | `--spk-max-seg-ms` | `4000` | 说话人分离粒度：VAD 段上限（毫秒），段越短越不易把两人快速接话并成一段；可回退 `8000` |
 | `--batch-size-s` | `60` | FunASR VAD 批切段时长（秒）：越大单次送入越长、调用次数越少但峰值内存越高；内存紧张默认保守，可在 90/120 间 A/B 验证后上调 |
@@ -305,9 +308,12 @@ src/
 │   ├── base.py                     # 转写器抽象接口
 │   └── funasr_transcriber.py       # FunASR 本地转写（SenseVoice / Paraformer，整段串行 + 缓存）
 ├── diarization/            # 说话人识别
+│   ├── probe.py                    # 分离前人数预检：多 K 轮廓系数扫描定后端与人数
+│   ├── speaker_diarization.py      # cam++ / wespeaker 两后端
+│   └── collapse_check.py           # 分离后塌缩检测（probe 未覆盖时的兜底）
 ├── processor/
 │   ├── prompt.py           # 忠实校订与提要生成提示词
-│   ├── normalize.py        # 文本归一化
+│   ├── normalize.py        # 文本归一化（含中文读数日期转阿拉伯数字）
 │   ├── llm_processor.py    # 并行分块校订、模型探测回退、校验、缓存与文稿整理
 │   ├── session_edit.py     # 会话内校订：固定规范提示词 + 结构校验器 + CLI
 │   ├── rebuild_transcript.py  # 会话包保真重建原文转录（防过度删减）

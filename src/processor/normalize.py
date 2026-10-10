@@ -194,6 +194,114 @@ def merge_repeat_chars(text: str) -> str:
 
 
 # ============================================================
+# 中文读数日期 → 阿拉伯数字（2026年9月28日）
+# ============================================================
+
+# ASR 的逆文本正则化（ITN）常把日期落成中文读数，还会在年与月之间插口语逗号
+# （实测 `二零二六年，九月二十八日星期一发布`）。成稿里保留中文读数既难扫读、
+# 也不利于后续检索与引用，统一落成阿拉伯数字。
+#
+# ============================================================
+
+# 只提年份、不带月日的情形（`二零二四年那篇生成式 AI 通往未来的桥`）。负向断言
+# 让它让位给上面的完整日期规则，避免转出 `2024年五月` 这种年数字其余中文的混血写法。
+_CN_YEAR_RE = re.compile(
+    r"([零一二三四五六七八九]{4})年(?![，,]?\s*[一二三四五六七八九十]{1,3}月)"
+)
+
+# 只认「年+月+日」完整结构——孤立的中文数字（「一是……二是……」）不会被误伤；
+# 年份限定为四字逐位读数（二零二六），口语的「两千零二十六年」暂不支持。
+_CN_DATE_RE = re.compile(
+    r"([零一二三四五六七八九]{4})年[，,]?\s*"
+    r"([一二三四五六七八九十]{1,3})月[，,]?\s*"
+    r"([一二三四五六七八九十]{1,3})日"
+)
+_CN_DIGITS = {
+    "零": 0, "一": 1, "二": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "两": 2,
+}
+
+
+def _cn_num_to_int(s: str) -> int | None:
+    """中文数字 → int。支持逐位读数（二零二六→2026）与十进位（十二/二十八/九）。"""
+    if not s:
+        return None
+    if all(ch in _CN_DIGITS for ch in s):
+        return int("".join(str(_CN_DIGITS[ch]) for ch in s))
+    if "十" in s and len(s) <= 3:
+        left, _, right = s.partition("十")
+        tens = 1 if left == "" else _CN_DIGITS.get(left)
+        ones = 0 if right == "" else _CN_DIGITS.get(right)
+        if tens is None or ones is None:
+            return None
+        return tens * 10 + ones
+    return None
+
+
+def normalize_cn_date(text: str) -> str:
+    """``二零二六年，九月二十八日`` → ``2026年9月28日``。
+
+    月份/日期越界（如听成「十三月」）或年份不在合理区间时**一律原样保留**——
+    宁可漏转也不错转，错误的外形比难读更难发现。
+    """
+    if not text:
+        return text
+
+    def _sub(m: re.Match[str]) -> str:
+        year, month, day = (
+            _cn_num_to_int(m.group(1)),
+            _cn_num_to_int(m.group(2)),
+            _cn_num_to_int(m.group(3)),
+        )
+        if year is None or month is None or day is None:
+            return m.group(0)
+        if not (1000 <= year <= 2999 and 1 <= month <= 12 and 1 <= day <= 31):
+            return m.group(0)
+        return f"{year}年{month}月{day}日"
+
+    def _sub_year(m: re.Match[str]) -> str:
+        year = _cn_num_to_int(m.group(1))
+        if year is None or not (1000 <= year <= 2999):
+            return m.group(0)
+        return f"{year}年"
+
+    # 先转完整日期，再转孤立年份——第二步自然跳过已被转成阿拉伯数字的部分
+    return _CN_YEAR_RE.sub(_sub_year, _CN_DATE_RE.sub(_sub, text))
+
+
+def _iter_date_hits(text: str):
+    """产出可转换的日期匹配：先完整日期，再孤立年份（负向断言排除已吃掉的部分）。"""
+    consumed: list[tuple[int, int]] = []
+    for m in _CN_DATE_RE.finditer(text or ""):
+        year, month, day = (
+            _cn_num_to_int(m.group(1)),
+            _cn_num_to_int(m.group(2)),
+            _cn_num_to_int(m.group(3)),
+        )
+        if (
+            year is not None
+            and month is not None
+            and day is not None
+            and 1000 <= year <= 2999
+            and 1 <= month <= 12
+            and 1 <= day <= 31
+        ):
+            consumed.append(m.span())
+            yield m
+    for m in _CN_YEAR_RE.finditer(text or ""):
+        if any(m.start() >= s and m.end() <= e for s, e in consumed):
+            continue
+        year = _cn_num_to_int(m.group(1))
+        if year is not None and 1000 <= year <= 2999:
+            yield m
+
+
+def count_cn_date(text: str) -> int:
+    """中文读数日期/年份的可转换处数（越界不算），供干跑预览用。"""
+    return sum(1 for _ in _iter_date_hits(text))
+
+
+# ============================================================
 # 成稿级入口：跳过 Show Notes（节目源简介透传，不归校订管）
 # ============================================================
 
@@ -202,7 +310,7 @@ _SKIP_SECTIONS = ("## Show Notes",)
 
 
 def _clean_block(block: str) -> str:
-    return merge_repeat_chars(normalize_en_punct(block))
+    return merge_repeat_chars(normalize_cn_date(normalize_en_punct(block)))
 
 
 def normalize_markdown(md: str) -> str:
@@ -250,9 +358,33 @@ def count_changes(md: str) -> tuple[int, int]:
     return hits_en, hits_rp
 
 
+def count_all(md: str) -> dict[str, int]:
+    """返回三类待改数量 ``{en_punct, repeat, cn_date}``，``## Show Notes`` 不计入。
+
+    比 ``count_changes`` 多了日期项；单独开一个新函数而非改旧签名，避免牵动
+    ``finish_phase_b`` / ``output_quality`` 等既有调用方。
+    """
+    if not md:
+        return {"en_punct": 0, "repeat": 0, "cn_date": 0}
+    marks = list(_SECTION_RE.finditer(md))
+    blocks = [md[: marks[0].start()]] if marks else [md]
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(md)
+        head, body = m.group(1), md[m.end(): end]
+        if not head.startswith(_SKIP_SECTIONS):
+            blocks.append(body)
+    out = {"en_punct": 0, "repeat": 0, "cn_date": 0}
+    for b in blocks:
+        en, rp = count_text(b)
+        out["en_punct"] += en
+        out["repeat"] += rp
+        out["cn_date"] += count_cn_date(b)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="成稿确定性规范化（外文词后半角标点转全角 + ≥3 连重复字合并，不调 LLM）"
+        description="成稿确定性规范化（外文词后半角标点转全角 + ≥3 连重复字合并 + 中文读数日期转阿拉伯数字，不调 LLM）"
     )
     ap.add_argument("md_path", type=Path, help="成稿 .md 路径")
     ap.add_argument("--apply", action="store_true", help="写回文件（自动 .bak 备份）")
@@ -264,12 +396,14 @@ def main() -> int:
 
     md = args.md_path.read_text(encoding="utf-8")
     new_md = normalize_markdown(md)
-    hits_en, hits_rp = count_changes(md)
+    counts = count_all(md)
+    hits_en, hits_rp, hits_date = counts["en_punct"], counts["repeat"], counts["cn_date"]
 
     print(f"文件: {args.md_path.name}")
     print(f"待转半角标点: {hits_en} 处")
     print(f"待合并 ≥3 连重复字: {hits_rp} 处")
-    if hits_en == 0 and hits_rp == 0:
+    print(f"待转中文读数日期: {hits_date} 处")
+    if hits_en == 0 and hits_rp == 0 and hits_date == 0:
         print("\n无需改动。")
         return 0
     if not args.apply:

@@ -369,15 +369,60 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
         resolve_issues: list[str] = []
         spk_to_label: dict[str, str] = {}
         if not args.no_diarization:
-            # 后端选择：auto 模式下圆桌/多人（base_k>=3）直接走 wespeaker，避免 cam++
-            # 系统性塌缩；--refresh-diarization 即「用 WeSpeaker 重分离」，强制 wespeaker。
+            # 后端选择：auto（默认）在**分离之前**先做一次人数预检（probe）。
+            # 旧判据「Show Notes 人数 >= 3 才升级 wespeaker」已废弃：#757 的 Show
+            # Notes 只抓到 1 位（漏了主播），而人数估计本身还会被 diarize 的
+            # sim_p10>=0.16 短路污染（#757/#706 都命中却实为双人）。详见
+            # src/diarization/probe.py 文档。
+            probe_result = None
+            probed_speakers: int | None = None
             if args.refresh_diarization:
                 effective_backend = "wespeaker"
+            elif args.diarization == "auto" and not args.no_probe:
+                try:
+                    from src.diarization.probe import probe_diarization, suggest
+
+                    logger.info("Step 4 前置：说话人人数预检（probe，抽样 %s）...", args.probe_sample_ratio)
+                    probe_result = probe_diarization(
+                        wav_file, sample_ratio=args.probe_sample_ratio
+                    )
+                    sug = suggest(probe_result)
+                    probe_result["suggestion"] = sug
+                    effective_backend = sug["backend"]
+                    probed_speakers = sug["num_speakers"]
+                    logger.info("预检结果：%s", sug["reason"])
+                    print(
+                        f"  人数预检 → 后端 {sug['backend']}"
+                        + (f"，K={sug['num_speakers']}" if sug["num_speakers"] else "")
+                        + f"（耗时 {probe_result['elapsed_total_s']}s）",
+                        file=sys.stderr,
+                    )
+                except Exception as exc:
+                    # 预检失败保守回退 cam++：它至少不会对单口做错误切分，
+                    # 且后置的 collapse_check 仍会把塌缩兜出来。
+                    logger.warning("人数预检失败，保守回退 cam++：%s", exc)
+                    effective_backend = "campplus"
             elif args.diarization == "auto":
                 effective_backend = "wespeaker" if (base_k and base_k >= 3) else "campplus"
-                logger.info("Step 4 后端(auto)：base_k=%s → %s", base_k, effective_backend)
+                logger.info("Step 4 后端(auto, 已跳过 probe)：base_k=%s → %s", base_k, effective_backend)
             else:
                 effective_backend = args.diarization
+
+            # 显式的说话人数：**给 None 会让 wespeaker 走 diarize 的 sim_p10 短路、
+            # 把双人访谈判成 1 人**（#757 塌缩的直接成因）。优先级：命令行 > probe
+            # > Show Notes 推定的 chosen_k。
+            effective_speakers: int | None = None
+            if effective_backend == "wespeaker":
+                effective_speakers = args.speakers or probed_speakers or chosen_k
+                if effective_speakers is None:
+                    effective_speakers = max(2, base_k or 2)
+                    logger.warning(
+                        "wespeaker 未拿到可信人数，兜底 K=%d（如需更精确请用 --speakers 显式指定）",
+                        effective_speakers,
+                    )
+            else:
+                # cam++ 路径沿用 Show Notes 推定的 K，保持既有行为
+                effective_speakers = chosen_k
 
             with Timer() as t:
                 if effective_backend == "wespeaker":
@@ -393,7 +438,7 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                             "请运行 pip install 'xiesheng[diarize]'（pyproject 已声明 diarize>=0.1.2）"
                         ) from exc
                     logger.info("Step 4/6: 说话人日志（WeSpeaker 外部 diarize，忽略转写自带标签）...")
-                    diarization_segments = run_diarization(wav_file, num_speakers=chosen_k)
+                    diarization_segments = run_diarization(wav_file, num_speakers=effective_speakers)
                     labeled_segments = assign_speakers(transcript.segments, diarization_segments)
                 else:
                     has_spk = any(seg.get("speaker") for seg in transcript.segments)
@@ -406,7 +451,7 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                             run_diarization,
                         )
                         logger.info("Step 4/6: 说话人日志（Speaker Diarization，独立模块）...")
-                        diarization_segments = run_diarization(wav_file, num_speakers=chosen_k)
+                        diarization_segments = run_diarization(wav_file, num_speakers=effective_speakers)
                         labeled_segments = assign_speakers(transcript.segments, diarization_segments)
                 try:
                     transcript_text, spk_to_label, resolve_issues, labeled_path = _finalize_labeling(
@@ -441,7 +486,7 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                                 assign_speakers,
                                 run_diarization,
                             )
-                            diarization_segments = run_diarization(wav_file, num_speakers=chosen_k)
+                            diarization_segments = run_diarization(wav_file, num_speakers=effective_speakers)
                             new_labeled = assign_speakers(transcript.segments, diarization_segments)
                             transcript_text, spk_to_label, resolve_issues, labeled_path = _finalize_labeling(
                                 new_labeled, episode, output_dir, safe_name
@@ -565,12 +610,16 @@ def main() -> None:
                         help="[弃用] 等价于 --llm-mode session，后续版本移除")
     parser.add_argument("--no-diarization", action="store_true", help="跳过说话人日志，不区分说话人")
     parser.add_argument(
-        "--diarization", choices=["campplus", "wespeaker", "auto"], default="campplus",
-        help="说话人分离后端：campplus=默认（SenseVoice spk_model 内嵌，零额外耗时）；"
-             "wespeaker=外部 WeSpeaker 独立 diarize（更稳，+7~11 分钟，需 pip install 'xiesheng[diarize]'）；"
-             "auto=按 Show Notes 人数自动选：圆桌/多人（>=3 人）走 wespeaker，否则 campplus，"
-             "且 cam++ 坍缩时进程内自动回退 wespeaker（不重转录）",
+        "--diarization", choices=["campplus", "wespeaker", "auto"], default="auto",
+        help="说话人分离后端（默认 auto）：campplus=SenseVoice spk_model 内嵌，零额外耗时，"
+             "但双人访谈也存在塌缩风险；wespeaker=外部 WeSpeaker 独立 diarize（更稳，代价是要显式给人数）；"
+             "auto=先跑人数预检 probe（VAD+embedding+多 K 轮廓系数扫描），按声学可分性决定后端与人数。"
+             "预检不可用时保守回退 cam++，后置的塌缩检测仍会兜住",
     )
+    parser.add_argument("--no-probe", action="store_true",
+                        help="跳过前置的人数预检，退回按 Show Notes 人数判据选后端")
+    parser.add_argument("--probe-sample-ratio", type=float, default=0.25,
+                        help="预检时的 VAD 段抽样比例（默认 0.25）。越低越快，长音频可调到 0.1")
     parser.add_argument(
         "--refresh-diarization", action="store_true",
         help="仅重跑说话人分离，复用已有转录与 WAV（跳过 ASR 重新下载/转写）。"

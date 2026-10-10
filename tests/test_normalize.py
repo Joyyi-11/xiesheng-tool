@@ -7,8 +7,10 @@
 
 from src.processor.normalize import (
     count_changes,
+    count_cn_date,
     count_text,
     merge_repeat_chars,
+    normalize_cn_date,
     normalize_en_punct,
     normalize_markdown,
     normalize_quotes,
@@ -107,6 +109,56 @@ class TestMergeRepeatChars:
 
     def test_empty_input(self):
         assert merge_repeat_chars("") == ""
+
+
+class TestCnDate:
+    """中文读数日期 → 阿拉伯数字（2026年9月28日）。
+
+    ASR 的逆文本正则化常把日期落成中文读数，扫读困难也不利于检索。
+    已知边界：只有「年+月」无「日」的形态（二零二四年五月）目前保持原样——
+    这类写法在口语里也可能只是随口带过，先不覆盖以避免误伤。
+    """
+
+    def test_converts_full_date(self):
+        assert normalize_cn_date("二零二六年九月二十八日发布") == "2026年9月28日发布"
+
+    def test_converts_with_spoken_comma_between_year_and_month(self):
+        # 口语常在年与月之间停顿，ASR 落成逗号
+        assert normalize_cn_date("二零二六年，九月二十八日星期一发布") == "2026年9月28日星期一发布"
+
+    def test_converts_year_only(self):
+        assert normalize_cn_date("二零二三年那篇") == "2023年那篇"
+
+    def test_converts_inside_sentence(self):
+        assert normalize_cn_date("mrbeast 在二零二五年说") == "mrbeast 在2025年说"
+
+    def test_converts_multiple_dates(self):
+        src = "从二零一四年二月十八日到二零二六年六月二日"
+        assert normalize_cn_date(src) == "从2014年2月18日到2026年6月2日"
+
+    def test_keeps_cn_numerals_in_enumerations(self):
+        # 一是……二是……三是…… 是列举，不是日期
+        src = "一是省钱，二是省力，三是省心"
+        assert normalize_cn_date(src) == src
+
+    def test_keeps_out_of_range_values(self):
+        # 听错的越界值改了反而是 misinformation，保持原样留给校订环节
+        assert normalize_cn_date("十三月三日") == "十三月三日"
+
+    def test_keeps_year_month_without_day(self):
+        assert normalize_cn_date("二零二四年五月") == "二零二四年五月"
+
+    def test_count_matches_conversion(self):
+        src = "二零二六年，九月二十八日与二零一四年二月十八日"
+        assert count_cn_date(src) == 2
+        assert normalize_cn_date(src).count("年") == 2
+
+    def test_idempotent(self):
+        once = normalize_cn_date("二零二六年，九月二十八日发布")
+        assert normalize_cn_date(once) == once
+
+    def test_empty_input(self):
+        assert normalize_cn_date("") == ""
 
 
 class TestNormalizeMarkdown:
