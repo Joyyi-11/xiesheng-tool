@@ -320,6 +320,45 @@ class TestCnNumber:
         assert count_cn_number(once) == 0
         assert normalize_cn_number(once) == once
 
+    def test_skips_ambiguous_and_merged_runs(self):
+        # 宁可漏转也不错转：下列读数实为「X 或 Y」概数范围，或两个相邻数量被
+        # 贪心正则黏在一起，一律保留中文，绝不腐蚀成单值。
+        # 省略千位的口语（一万五 = 1万5千）与跨数量边界（一亿两 = 1亿 + 两周）也跳过。
+        cases = [
+            "一万五",          # 万后裸数字、空后缀 → 跳过（曾腐蚀成 10005）
+            "一亿两周",         # 亿后裸数字、空后缀 → 跳过（曾腐蚀成 100000002周）
+            "五十五十",         # 重复进位字「十」→ 两个数量黏连，跳过
+            "四十五十",         # 同上
+            "十一二十",         # 重复进位字「十」→ 跳过
+            "十八十九",         # 同上
+            "三十万二十万",       # 重复进位字「万」→ 跳过（曾腐蚀成 300020万）
+            "七八十",           # 连续单字读数 → 概数范围，跳过
+            "两三百",           # 同上
+            "四五十",           # 同上
+            "五六百",           # 同上
+            "一两千",           # 同上
+            "三四万",           # 同上（曾错转成 4万）
+            "二三十万",         # 同上（曾错转成 30万）
+            "三六万",           # 同上（曾错转成 6万）
+            "一二一百",         # 连续单字 → 跳过
+            "十一五",           # 连续单字 + 非数量词，跳过
+            "一二",            # 连续单字（概数）→ 跳过
+            "三五",            # 同上
+            "亿万富翁",         # 「亿万」是词不是数量 → 跳过
+            "数百万人",         # 概数前缀「数」→ 跳过
+            "数百",            # 同上
+        ]
+        for s in cases:
+            assert normalize_cn_number(s) == s, f"应保留中文: {s!r} -> {normalize_cn_number(s)!r}"
+
+    def test_still_converts_well_formed(self):
+        # 上述守卫不得误伤真正规范的数量读数
+        assert normalize_cn_number("五百") == "500"
+        assert normalize_cn_number("十一万两千") == "112000"
+        assert normalize_cn_number("十一万五千") == "115000"
+        assert normalize_cn_number("七十八") == "78"
+        assert normalize_cn_number("五十五") == "55"
+
 
 class TestTurnTerminal:
     """原文转录：话轮末逗号须转句号（话轮边界即句末）。"""
