@@ -118,3 +118,9 @@ def test_struct_rules_reach_session_structure_section():
         "正文格式（**姓名**：简介）",
     ):
         assert text in SESSION_RULES
+
+
+def test_glossary_must_inline_into_key_points():
+    # v25+ 术语表口径：已在核心观点/问题与思考展开的概念必须就近内联，不得单列术语表
+    assert "就近内联" in rules.STRUCT_GLOSSARY
+    assert "绝不许再单列成术语表" in rules.STRUCT_GLOSSARY

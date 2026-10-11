@@ -308,6 +308,121 @@ def count_cn_date(text: str) -> int:
 
 
 # ============================================================
+# 中文读数数量 → 阿拉伯数字（十六家→16家、十二亿用户→12亿用户）
+# ============================================================
+
+# ASR 常把数量落成中文读数，难扫读、不利检索。连漪 2026-10-11 拍板：数量尽量用
+# 阿拉伯数字，一眼就能锁定那个数。与日期规则的区别：日期只认「年+月+日/年」结构，
+# 本条覆盖一切「中文数字 + 量词/名词」的数量（十六家、十二亿用户、三百六十五、两万…）。
+#
+# 防误伤（宁可漏转也不错转）：
+#   - 后接 月/日/号/年 的读数交给日期规则（如「十三月」不转，避免覆盖日期守卫）；
+#   - 两字读数若构成非数量词（万一＝倘若、千万＝务必）列入黑名单跳过；
+#   - 单字读数（一/三/六…）不单独转——成语（一心一意、五颜六色）与「一点/一些」
+#     都是单字，转了必错；多字读数（十六、十二亿、三百）才转，天然避开绝大多数成语。
+_CN_RUN_RE = re.compile(r"[零一二三四五六七八九十百千万亿两]+")
+_BLOCKLIST_Q = ("万一", "千万")
+_Q_SCALE = ("万", "亿")
+
+
+def _cn_quantity_to_int(s: str) -> int | None:
+    """完整中文数字 → int（支持 十百千万亿 进位，如 十二亿→1200000000）。
+
+    遇非数字字符返回 None（放弃该读数，交由上层原样保留）。
+    """
+    if not s:
+        return None
+    total = section = number = 0
+    for ch in s:
+        if ch in _CN_DIGITS:
+            number = _CN_DIGITS[ch]
+        elif ch == "十":
+            number = 1 if number == 0 else number
+            section += number * 10
+            number = 0
+        elif ch == "百":
+            section += (1 if number == 0 else number) * 100
+            number = 0
+        elif ch == "千":
+            section += (1 if number == 0 else number) * 1000
+            number = 0
+        elif ch == "万":
+            section = (section + number) * 10000
+            total += section
+            section = number = 0
+        elif ch == "亿":
+            section = (section + number) * 100000000
+            total += section
+            section = number = 0
+        else:
+            return None
+    return total + section + number
+
+
+def _cn_number_sub(m: re.Match[str]) -> str:
+    run = m.group(0)
+    if run in _BLOCKLIST_Q or len(run) < 2:
+        return run
+    text, i = m.string, m.end()
+    # 后接字符约束：末尾（无后接）→ 转；后接 月/日/号/年 → 交日期规则；
+    # 后接其它非中文（拉丁/标点/数字）→ 不转（避免「十六 3 家」这类或孤立读数）。
+    # 后接中文（量词/名词/助词）→ 转。
+    if i < len(text):
+        nxt = text[i]
+        if nxt in "月日号年" or not _CJK_RE.match(nxt):
+            return run
+    # 尾部 万/亿 作为单位保留（十二亿→12亿）；其余出整数（三百六十五→365）
+    tail = re.fullmatch(r"(.+?)([万亿])$", run)
+    if tail:
+        head = _cn_quantity_to_int(tail.group(1))
+        return run if head is None else f"{head}{tail.group(2)}"
+    v = _cn_quantity_to_int(run)
+    return run if v is None else str(v)
+
+
+def normalize_cn_number(text: str) -> str:
+    """中文读数数量转阿拉伯数字（保留万/亿单位），避开日期与成语。"""
+    if not text:
+        return text
+    return _CN_RUN_RE.sub(_cn_number_sub, text)
+
+
+def count_cn_number(text: str) -> int:
+    """可转换的中文读数数量处数（供干跑预览用）。"""
+    if not text:
+        return 0
+    n = 0
+    for m in _CN_RUN_RE.finditer(text):
+        if _cn_number_sub(m) != m.group(0):
+            n += 1
+    return n
+
+
+# ============================================================
+# 原文转录：话轮末逗号转句号（rules 话轮边界即句末，2026-10-11 连漪拍板）
+# ============================================================
+
+# 成因：ASR 在话轮边界把一句话切开，导致「一个人讲完却用逗号收尾」的不自然形态
+# （下一行本就是另一位说话人，并不存在真正的跨话轮续句）。话轮边界应视作句末，
+# 逗号收尾须转句号。只在「## 原文转录」段生效。
+_TURN_RE = re.compile(r"^(【[^】]*】)(.*)$")
+
+
+def normalize_turn_terminal(block: str) -> str:
+    """原文转录每个【说话人】话轮若以逗号（，或 ,）收尾，改为句号（。）。"""
+    if not block:
+        return block
+    out: list[str] = []
+    for line in block.split("\n"):
+        stripped = line.rstrip()
+        if _TURN_RE.match(stripped) and stripped.endswith(("，", ",")):
+            fixed = stripped[:-1] + "。"
+            line = fixed + line[len(stripped):]
+        out.append(line)
+    return "\n".join(out)
+
+
+# ============================================================
 # 核心观点：句末引用原话自带句末标点（rules.STRUCT_KEY_POINT 的确定性落地）
 # ============================================================
 
@@ -412,6 +527,32 @@ def sync_handoff_quotes(doc: dict, quotes: list[str]) -> int:
     return hits
 
 
+def _sync_handoff_numbers(doc: dict) -> int:
+    """把 handoff 文本字段的中文读数数量转阿拉伯数字，返回改动处数。
+
+    原因同 ``sync_handoff_quotes``：handoff 是上层章节的重渲染源，只改 md 不改
+    handoff 会在下次 Phase B 时被覆盖回去。``anchor`` 不动（须与转录逐字一致）。
+    """
+    n = 0
+    for kp in doc.get("key_points") or []:
+        for key in ("point", "evidence", "quote"):
+            v = kp.get(key)
+            if isinstance(v, str) and v:
+                new = normalize_cn_number(v)
+                if new != v:
+                    kp[key] = new
+                    n += 1
+    for q in doc.get("questions") or []:
+        for key in ("question", "answer"):
+            v = q.get(key)
+            if isinstance(v, str) and v:
+                new = normalize_cn_number(v)
+                if new != v:
+                    q[key] = new
+                    n += 1
+    return n
+
+
 # ============================================================
 # 成稿级入口：跳过 Show Notes（节目源简介透传，不归校订管）
 # ============================================================
@@ -437,9 +578,13 @@ def _iter_blocks(md: str) -> list[tuple[str, str, str]]:
 
 
 def _clean_block(block: str, head: str = "") -> str:
-    block = merge_repeat_chars(normalize_cn_date(normalize_en_punct(block)))
+    block = merge_repeat_chars(
+        normalize_cn_date(normalize_cn_number(normalize_en_punct(block)))
+    )
     if head == _KEY_POINT_HEAD:
         block = normalize_quote_period(block)
+    elif head in ("## 原文转录", "## 全文转录"):
+        block = normalize_turn_terminal(block)
     return block
 
 
@@ -478,14 +623,14 @@ def count_changes(md: str) -> tuple[int, int]:
 
 
 def count_all(md: str) -> dict[str, int]:
-    """返回四类待改数量 ``{en_punct, repeat, cn_date, quote_period}``，``## Show Notes`` 不计入。
+    """返回待改数量 ``{en_punct, repeat, cn_date, cn_number, quote_period}``，``## Show Notes`` 不计入。
 
-    比 ``count_changes`` 多了日期与引语句末标点两项；单独开一个新函数而非改旧
-    签名，避免牵动 ``finish_phase_b`` / ``output_quality`` 等既有调用方。
+    比 ``count_changes`` 多了日期、数量与引语句末标点三项；单独开一个新函数而非
+    改旧签名，避免牵动 ``finish_phase_b`` / ``output_quality`` 等既有调用方。
     """
     if not md:
-        return {"en_punct": 0, "repeat": 0, "cn_date": 0, "quote_period": 0}
-    out = {"en_punct": 0, "repeat": 0, "cn_date": 0, "quote_period": 0}
+        return {"en_punct": 0, "repeat": 0, "cn_date": 0, "cn_number": 0, "quote_period": 0}
+    out = {"en_punct": 0, "repeat": 0, "cn_date": 0, "cn_number": 0, "quote_period": 0}
     for _raw, head, body in _iter_blocks(md):
         if head.startswith(_SKIP_SECTIONS):
             continue
@@ -493,6 +638,7 @@ def count_all(md: str) -> dict[str, int]:
         out["en_punct"] += en
         out["repeat"] += rp
         out["cn_date"] += count_cn_date(body)
+        out["cn_number"] += count_cn_number(body)
         if head == _KEY_POINT_HEAD:
             out["quote_period"] += count_quote_period(body)
     return out
@@ -500,7 +646,7 @@ def count_all(md: str) -> dict[str, int]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="成稿确定性规范化（外文词后半角标点转全角 + ≥3 连重复字合并 + 中文读数日期转阿拉伯数字 + 核心观点引语句末标点，不调 LLM）"
+        description="成稿确定性规范化（外文词后半角标点转全角 + ≥3 连重复字合并 + 中文读数日期转阿拉伯数字 + 中文读数数量转阿拉伯数字 + 原文转录话轮末逗号转句号 + 核心观点引语句末标点，不调 LLM）"
     )
     ap.add_argument("md_path", type=Path, help="成稿 .md 路径")
     ap.add_argument("--apply", action="store_true", help="写回文件（自动 .bak 备份）")
@@ -519,7 +665,8 @@ def main() -> int:
     new_md = normalize_markdown(md)
     counts = count_all(md)
     hits_en, hits_rp = counts["en_punct"], counts["repeat"]
-    hits_date, hits_quote = counts["cn_date"], counts["quote_period"]
+    hits_date, hits_number = counts["cn_date"], counts["cn_number"]
+    hits_quote = counts["quote_period"]
 
     # 承接残句不自动改，单独列出来交人工回原文补全
     quote_manual: list[str] = []
@@ -532,13 +679,14 @@ def main() -> int:
     print(f"待转半角标点: {hits_en} 处")
     print(f"待合并 ≥3 连重复字: {hits_rp} 处")
     print(f"待转中文读数日期: {hits_date} 处")
+    print(f"待转中文读数数量: {hits_number} 处")
     print(f"待补引语句末标点: {hits_quote} 处")
     if quote_manual:
         print(f"\n需人工判断的承接残句 {len(quote_manual)} 处（不自动补）：")
         for q in quote_manual:
             print(f"  「{q}」")
 
-    if hits_en == 0 and hits_rp == 0 and hits_date == 0 and not quote_fixable:
+    if hits_en == 0 and hits_rp == 0 and hits_date == 0 and hits_number == 0 and not quote_fixable:
         print("\n无需改动。")
         return 0
     if not args.apply:
@@ -551,20 +699,25 @@ def main() -> int:
     args.md_path.write_text(new_md, encoding="utf-8")
     print(f"\n已写回 {args.md_path.name}（备份 {bak.name}）")
 
-    if args.no_handoff or not quote_fixable:
+    if args.no_handoff:
         return 0
     handoff = args.md_path.with_name(args.md_path.name[: -len(".md")] + "_handoff.json")
     if not handoff.exists():
         return 0
     doc = json.loads(handoff.read_text(encoding="utf-8"))
     n = sync_handoff_quotes(doc, quote_fixable)
-    if not n:
-        return 0
-    h_bak = handoff.with_suffix(handoff.suffix + ".bak")
-    if not h_bak.exists():
-        shutil.copy2(handoff, h_bak)
-    handoff.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"已同步 {handoff.name} 的 quote {n} 处（备份 {h_bak.name}；anchor 未动）")
+    n_num = _sync_handoff_numbers(doc)
+    if n or n_num:
+        h_bak = handoff.with_suffix(handoff.suffix + ".bak")
+        if not h_bak.exists():
+            shutil.copy2(handoff, h_bak)
+        handoff.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        parts = []
+        if n:
+            parts.append(f"quote {n} 处")
+        if n_num:
+            parts.append(f"数量 {n_num} 处")
+        print(f"已同步 {handoff.name} 的 {'、'.join(parts)}（备份 {h_bak.name}；anchor 未动）")
     return 0
 
 

@@ -145,6 +145,10 @@ def merge_same_speaker_blocks(transcript: str) -> str:
                 text += part
             else:
                 text += "。" + part
+        # 关闭话轮：ASR 常在话轮边界把一句话切开，导致「一个人讲完却用逗号结尾」。
+        # 话轮边界应视作句末，逗号收尾须转句号（下一行本就是另一位说话人）。
+        if text.endswith(("，", ",")):
+            text = text[:-1] + "。"
         out.append(f"【{speaker}】{text}" if speaker else text)
     return "\n\n".join(out)
 

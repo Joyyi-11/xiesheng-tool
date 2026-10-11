@@ -2,6 +2,40 @@
 
 本文件记录 `xiesheng-tool` 公开镜像的关键同步与变更。完整开发历史见私有仓 `lianyi-xiesheng`，公开仓为人工策展子集、非盲拷。
 
+## 2026-10-11（二）— 两条新确定性规则：话轮末逗号转句号 + 中文数量转阿拉伯数字 + rules v26
+
+来源：私有仓提交 `abd92f9`（规则硬化）、`d6ef3be`（#757 应用）。上一轮把句末引语句号内化后，本轮补齐两类同样"纯机械可判定、却长期靠人工校订"的问题，并把术语表规则升级为有机器闸门的硬规则。
+
+### 1. 话轮末逗号转句号（原文转录的组装层缺陷）
+
+`## 原文转录` 里出现大量"一个人讲完却以逗号收尾"的行：根因不是 ASR 故意打逗号，而是说话人分离的边界正好落在逗号上、下一行又换了人。此前只能靠人工校订逐处改，本轮从两层堵死：
+
+- `src/processor/normalize.py` 新增 `normalize_turn_terminal`：`normalize_markdown` 对所有段落生效，把 `【说话人】…，` 的话轮末逗号改为句号。
+- `src/utils.py` 的 `merge_same_speaker_blocks`（组装环节）兜底：未来新集从源头干净，不再产生话轮末逗号。
+- `src/processor/session_edit.py`：`validate_session_output` 加冗余闸门，漏改会被卡住。
+
+### 2. 中文数量转阿拉伯数字
+
+ASR 把数量落成中文读数（`十六家`、`十二亿用户`、`一百二十位`），难扫读、不利于一眼锁定数字。`src/processor/normalize.py` 新增 `normalize_cn_number`：转阿拉伯数字并保留万/亿单位（`十六家→16家`、`十二亿→12亿`、`三百六十五→365`），刻意避开日期（月/日/号/年）与成语误伤。`--apply` 顺带 `_sync_handoff_numbers` 同步 handoff 的描述字段（`anchor`/`quote` 逐字字段不动，防下次重渲染回潮）。
+
+### 3. 术语表规则升级为硬规则（rules v25 → v26）
+
+此前规则只说"能不写就不写"、无机器闸门，模型默认会列术语表（#757 即漏）。本次：
+
+- `src/processor/rules.py`：`STRUCT_GLOSSARY` 重写——**已单列成核心观点/问题与思考的概念必须就近内联（缩进子条目），绝不许再单列成术语表；无则整节不写**；`RULES_SPEC_VERSION` 25 → 26。
+- `src/processor/session_edit.py`：术语表条目若已在核心观点/问题与思考中展开（术语长度 ≥ 3，防短常用词误报）即报错要求内联。
+- `src/processor/normalize.py`：GOLDEN 夹具去掉冗余术语表（原把模型塌缩等同时写进核心观点与术语表，正是新规则禁止的形态），相应改写/新增测试。
+
+### 4. 测试
+
+- `tests/test_normalize.py` 追加 `TestCnNumber`（约 13 例：十六家/十二亿/三百六十五/末尾数量/万单位保留/日期与成语负例）与 `TestTurnTerminal`（约 12 例：话轮末逗号转句号/非话轮逗号不动/句末句号不动/幂等），连同上一轮引语句号与日期用例，套件 344 → **372 passed**。
+- `tests/test_session_edit.py` 增补术语表冗余闸门用例。
+
+### 刻意保留的差异
+
+- `scripts/oneoff/build_uncertainty_pack.py`（检索式校订候选包）仍未 ship：它依赖同目录的 `fix_transcript_surface.py` / `scan_typo_candidates.py`，这两个都不在公开仓，文档一旦指向就是断链。等校订工具链整体开源时一并评估。
+- 同步时源码统一按 LF 落盘（公开仓 `.gitattributes` 为 `* text=auto`）。
+
 ## 2026-10-11 — 句末引语句号规则内化 + rules v25 对齐
 
 来源：私有仓提交 `b1337ca`（规则内化）、`2706189`（成稿应用）。把「核心观点末尾的引用原话必须自带句末标点」从一次性脚本提升为确定性层，并补齐上一轮漏同步的 rules v25。

@@ -351,6 +351,20 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
             problems.append("术语表中存在格式不符的条目（每条须为 **术语**：解释）")
         if not all(item.rstrip().endswith(("。", ".")) for item in terms):
             problems.append("术语表每条解释须以句号结尾")
+        # 冗余校验：术语若已在核心观点/问题与思考中展开，应就近内联，不得单列
+        if "## 核心观点" in sections or "## 问题与思考" in sections:
+            _kp_text = sections.get("## 核心观点", "") + "\n" + sections.get("## 问题与思考", "")
+            for item in terms:
+                _m = re.search(r"\*\*(.+?)\*\*[:：]", item)
+                if not _m:
+                    continue
+                _term = _m.group(1).strip()
+                # 长度 >=3 才判冗余，避免「变化」「选择」等两字常用词在正文出现就被误报
+                if _term and len(_term) >= 3 and _term in _kp_text:
+                    problems.append(
+                        f"术语表条目「{_term}」已在核心观点/问题与思考中展开，"
+                        f"应就近内联到对应条目下（缩进子条目），不要再单列术语表"
+                    )
 
     # 人物简介：每人一行正文（**身份**：简介），不用引用
     intro = sections.get("## 人物简介", "")
@@ -474,6 +488,22 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
         if _n_rp:
             problems.append(
                 f"原文转录区残留 {_n_rp} 处 ≥3 连重复字（应合并为一个；2 连与拟声、应答叠用保留）。"
+                "确定性修复：`python -m src.processor.normalize <md> --apply`"
+            )
+
+    # 原文转录：话轮末逗号须转句号（2026-10-11 连漪拍板，确定性规则硬闸门）
+    # 成因：ASR 在话轮边界把一句话切开，导致「一个人讲完却用逗号收尾」；话轮边界
+    # 即句末，逗号收尾应转句号（下一行本就是另一位说话人，无真正的跨话轮续句）。
+    # 确定性修复在 src.processor.normalize（normalize_turn_terminal），同走
+    # `python -m src.processor.normalize <md> --apply`。
+    if transcript:
+        _n_turn_comma = sum(
+            1 for _ln in transcript.split("\n")
+            if re.match(r"^【[^】]*】", _ln.strip()) and _ln.strip().endswith(("，", ","))
+        )
+        if _n_turn_comma:
+            problems.append(
+                f"原文转录区有 {_n_turn_comma} 个【说话人】话轮以逗号收尾（应转句号）。"
                 "确定性修复：`python -m src.processor.normalize <md> --apply`"
             )
 

@@ -28,14 +28,6 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 - **模型塌缩不可避免。**关键在于对 AI 数据的筛选。
 - **AI 无法替代人类品味。**目前 AI 更需要的是 harness。
 
-## 术语表
-
-- **数据飞轮**：开源模型无法从用户回流数据的结构性缺陷。
-- **模型塌缩**：AI 用生成数据训练导致能力退化的现象。
-- **认知负债**：过度依赖 AI 导致思考能力下降。
-- **主权 AI**：各国训练符合自身价值观的大模型。
-- **品味（Taste）**：人类定义问题与指引优化的能力。
-
 ## 问题与思考
 
 1. **开源模型最大的结构性缺陷是什么？**
@@ -117,17 +109,18 @@ def test_validate_rejects_missing_questions():
     assert any("问题与思考" in p for p in problems)
 
 
-def test_validate_accepts_empty_terms_glossary():
-    # 残留术语表 0 条合法（不再强制 4-8）
-    bad = GOLDEN.replace(
-        "- **数据飞轮**：开源模型无法从用户回流数据的结构性缺陷。\n"
-        "- **模型塌缩**：AI 用生成数据训练导致能力退化的现象。\n"
-        "- **认知负债**：过度依赖 AI 导致思考能力下降。\n"
-        "- **主权 AI**：各国训练符合自身价值观的大模型。\n"
-        "- **品味（Taste）**：人类定义问题与指引优化的能力。\n",
-        "",
+def _inject_glossary(md: str, body: str) -> str:
+    # 在「问题与思考」之前插入术语表小节（位置须为核心观点之后、问题与思考之前）
+    return md.replace("## 问题与思考", "## 术语表\n\n" + body + "\n\n## 问题与思考", 1)
+
+
+def test_validate_accepts_valid_orphan_glossary():
+    # 与核心观点/问题与思考毫无关联的残留硬术语，单独成术语表合法
+    md = _inject_glossary(
+        GOLDEN,
+        "- **MoE（混合专家）**：一种将模型拆成多个专家子网络、按需激活的架构。",
     )
-    problems = validate_session_output(bad)
+    problems = validate_session_output(md)
     assert all("术语表" not in p for p in problems)
 
 
@@ -184,13 +177,20 @@ def test_session_rules_require_bolded_question():
 
 def test_validate_rejects_malformed_terms_glossary():
     # 有条目时仍须为 **术语**：解释、句号结尾
-    bad = GOLDEN.replace("- **数据飞轮**：", "- 数据飞轮：")
-    problems = validate_session_output(bad)
+    md = _inject_glossary(GOLDEN, "- MoE（混合专家）：一种按需激活的架构")
+    problems = validate_session_output(md)
     assert any("格式不符" in p for p in problems)
 
-    bad2 = GOLDEN.replace("结构性缺陷。", "结构性缺陷")
-    problems2 = validate_session_output(bad2)
+    md2 = _inject_glossary(GOLDEN, "- **MoE（混合专家）**：一种按需激活的架构")
+    problems2 = validate_session_output(md2)
     assert any("句号" in p for p in problems2)
+
+
+def test_validate_flags_redundant_terms_glossary():
+    # 术语表条目已在核心观点中展开（模型塌缩本身就是一条核心观点），应内联、不得单列
+    md = _inject_glossary(GOLDEN, "- **模型塌缩**：AI 用生成数据训练导致能力退化的现象。")
+    problems = validate_session_output(md)
+    assert any("已在核心观点" in p for p in problems)
 
 
 def test_validate_rejects_leftover_speaker_labels():

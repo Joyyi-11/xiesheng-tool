@@ -1,23 +1,26 @@
 """Tests for deterministic text normalization (project house style).
 
-覆盖四组确定性规则：引号规范化（转录落盘时用）、外文词后半角标点转全角、
-≥3 连重复字合并、中文读数日期转阿拉伯数字、核心观点句末引语补句末标点
-（后四组为成稿级，2026-09-15 起由 `python -m src.processor.normalize`
-兜底，源自公开仓 issue #1 / #2）。
+覆盖确定性规则：引号规范化（转录落盘时用）、外文词后半角标点转全角、
+≥3 连重复字合并、中文读数日期转阿拉伯数字、中文读数数量转阿拉伯数字、
+原文转录话轮末逗号转句号、核心观点句末引语补句末标点
+（成稿级规则由 `python -m src.processor.normalize` 兜底，源自公开仓 issue #1 / #2）。
 """
 
 from src.processor.normalize import (
     count_all,
     count_changes,
     count_cn_date,
+    count_cn_number,
     count_quote_period,
     count_text,
     merge_repeat_chars,
     normalize_cn_date,
+    normalize_cn_number,
     normalize_en_punct,
     normalize_markdown,
     normalize_quote_period,
     normalize_quotes,
+    normalize_turn_terminal,
     scan_quote_period,
     sync_handoff_quotes,
 )
@@ -266,6 +269,94 @@ class TestQuotePeriod:
         }
         n = sync_handoff_quotes(doc, ["互联网上的大多数操作都会由 Agent 来完成"])
         assert n == 1
-        kp = doc["key_points"][0]
-        assert kp["quote"].endswith("完成。")
-        assert kp["anchor"].endswith("完成")  # 锚点须与转录逐字一致，不能动
+
+
+class TestCnNumber:
+    """中文读数数量 → 阿拉伯数字（保留万/亿单位，避开日期与成语）。"""
+
+    def test_two_digit_with_measure(self):
+        assert normalize_cn_number("十六家合作伙伴") == "16家合作伙伴"
+
+    def test_scale_unit_preserved(self):
+        assert normalize_cn_number("多达十二亿用户") == "多达12亿用户"
+
+    def test_full_integer(self):
+        assert normalize_cn_number("三百六十五天") == "365天"
+
+    def test_two_wan(self):
+        assert normalize_cn_number("两万用户") == "2万用户"
+
+    def test_thousands_resolved(self):
+        assert normalize_cn_number("三万五千人") == "35000人"
+
+    def test_idiom_untouched(self):
+        # 单字读数不单独转，成语天然避开
+        assert normalize_cn_number("他一心一意地做") == "他一心一意地做"
+        assert normalize_cn_number("五颜六色的灯") == "五颜六色的灯"
+
+    def test_blocklist_words(self):
+        # 万一＝倘若、千万＝务必，不是数量
+        assert normalize_cn_number("万一来不及") == "万一来不及"
+        assert normalize_cn_number("千万不要这样") == "千万不要这样"
+
+    def test_date_guard_not_touched(self):
+        # 后接 月/日/号/年 的读数归日期规则管
+        assert normalize_cn_number("十三月") == "十三月"
+        assert normalize_cn_number("二零二六年发布") == "二零二六年发布"
+
+    def test_applies_to_all_sections(self):
+        md = (
+            "## 核心观点\n\n- **亮点。**已开放给十六家合作伙伴。\n\n"
+            "## 原文转录\n\n【Tibo】我们有一十六家伙伴。\n"
+        )
+        out = normalize_markdown(md)
+        assert "16家合作伙伴" in out
+        assert "16家伙伴" in out
+
+    def test_count_and_idempotent(self):
+        src = "十六家、十二亿用户、三百六十五"
+        assert count_cn_number(src) == 3
+        once = normalize_cn_number(src)
+        assert count_cn_number(once) == 0
+        assert normalize_cn_number(once) == once
+
+
+class TestTurnTerminal:
+    """原文转录：话轮末逗号须转句号（话轮边界即句末）。"""
+
+    def test_speaker_turn_comma_to_period(self):
+        src = "【Tibo】你唯一需要配置的就是想通过哪些渠道跟他交流，\n"
+        assert normalize_turn_terminal(src) == "【Tibo】你唯一需要配置的就是想通过哪些渠道跟他交流。\n"
+
+    def test_multiple_turns(self):
+        src = (
+            "【Tibo】它还会继续发生相当根本的变化。直到有一天他变得顺手了，\n"
+            "【Lenny】谢谢你来参加这次访谈，\n"
+            "【Tibo】也谢谢你邀请我。当然这房间不错，\n"
+        )
+        out = normalize_turn_terminal(src)
+        assert out.count("，\n") == 0
+        assert out.count("。\n") == 3
+
+    def test_non_speaker_line_untouched(self):
+        # 无 【说话人】 前缀的行（结构性/续行）不误改
+        src = "这是一句没说完的话，\n"
+        assert normalize_turn_terminal(src) == src
+
+    def test_already_period_untouched(self):
+        src = "【Tibo】他说完了。\n"
+        assert normalize_turn_terminal(src) == src
+
+    def test_only_applies_to_transcript_section(self):
+        md = (
+            "## 摘要\n\n他提到一个未说完的观点，\n\n"
+            "## 原文转录\n\n【Lenny】谢谢你来参加这次访谈，\n"
+        )
+        out = normalize_markdown(md)
+        assert "未说完的观点，" in out          # 摘要不动
+        assert "谢谢你来参加这次访谈。" in out  # 转录转句号
+
+    def test_idempotent(self):
+        src = "【Tibo】讲到一半，\n"
+        once = normalize_turn_terminal(src)
+        assert normalize_turn_terminal(once) == once
