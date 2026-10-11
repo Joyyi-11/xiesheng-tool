@@ -11,13 +11,19 @@ from src.processor.normalize import (
     count_changes,
     count_cn_date,
     count_cn_number,
+    count_punct,
     count_quote_period,
     count_text,
     merge_repeat_chars,
     normalize_cn_date,
     normalize_cn_number,
     normalize_en_punct,
+    normalize_cjk_halfwidth,
     normalize_markdown,
+    normalize_orphan_punct,
+    normalize_punct,
+    normalize_punct_cluster,
+    normalize_punct_space,
     normalize_quote_period,
     normalize_quotes,
     normalize_turn_terminal,
@@ -182,8 +188,9 @@ class TestNormalizeMarkdown:
 
     def test_converts_outside_show_notes(self):
         out = normalize_markdown(self.MD)
-        assert "本期聊 agent， 很有意思。" in out
-        assert "你好，这个 agent， 我们聊聊。" in out
+        # 原来的「半角逗号转全角」之后，停顿空格也一并清掉（见 TestPunctSpace）
+        assert "本期聊 agent，很有意思。" in out
+        assert "你好，这个 agent，我们聊聊。" in out
 
     def test_show_notes_is_passed_through(self):
         # Show Notes 是节目源简介透传，不归校订管
@@ -399,3 +406,189 @@ class TestTurnTerminal:
         src = "【Tibo】讲到一半，\n"
         once = normalize_turn_terminal(src)
         assert normalize_turn_terminal(once) == once
+
+
+class TestPunctSpace:
+    """① 停顿空格：全角标点两侧不得有多余空格。"""
+
+    def test_space_after_punct_removed(self):
+        # ASR 在停顿处先留空格后补标点，空格就夹在了标点与下文之间
+        assert normalize_punct_space("你好啊，我是嘉宾， 欢迎来到节目") == (
+            "你好啊，我是嘉宾，欢迎来到节目"
+        )
+
+    def test_space_after_punct_before_latin_removed(self):
+        # 中文—西文之间按库内 93.7% 的无空格惯例（1970 : 132）
+        assert normalize_punct_space("他有数据， what 以及为什么") == "他有数据，what 以及为什么"
+
+    def test_space_before_punct_removed(self):
+        assert normalize_punct_space("包括种种困惑 。") == "包括种种困惑。"
+        assert normalize_punct_space("3 分钟 ：商业策划") == "3 分钟：商业策划"
+
+    def test_multiple_spaces_collapsed(self):
+        assert normalize_punct_space("排列，   然后") == "排列，然后"
+
+    def test_english_context_space_kept(self):
+        # 半角标点不属于清空格的字符集，西文句内的正常空格必须原样保留
+        assert normalize_punct_space("Talk is cheap, show me the code") == (
+            "Talk is cheap, show me the code"
+        )
+
+    def test_no_false_positive_on_cjk_latin_space(self):
+        # 中文与西文之间的空格是正确排版，不能误删
+        assert normalize_punct_space("我在用 Claude 写代码") == "我在用 Claude 写代码"
+
+    def test_source_line_separator_kept(self):
+        # 来源行用 ` | ` 分字段，双向空格是结构的一部分（干跑实测曾被吃掉）
+        src = "> 来源：播客 | 你的职业价值只剩下野心与判断力？ | 2026-08-31"
+        assert normalize_punct_space(src) == src
+
+    def test_latin_initials_kept(self):
+        # 西文人名缩写：句点间的空格删了会挤成一坨（R。F。Kuang）
+        src = "**匡灵秀（R。 F。 Kuang）**：作家、教师"
+        assert normalize_punct_space(src) == src
+
+    def test_english_clause_space_kept(self):
+        # 英文从句/歌词整句被转成全角标点后，空格是英文书写所必须
+        src = "You're on your own kid， you always have been"
+        assert normalize_punct_space(src) == src
+
+    def test_space_removed_before_cjk_after_latin(self):
+        # 英文术语后接中文：空格一律删（这是 ASR 留空格的重灾区）
+        assert normalize_punct_space("就是一个编程 Agent， 我们做出来了") == (
+            "就是一个编程 Agent，我们做出来了"
+        )
+
+
+class TestPunctCluster:
+    """② 堆叠标点：冗余停顿删除、同类合并取首个。"""
+
+    def test_pause_before_terminal_removed(self):
+        assert normalize_punct_cluster("你要水电煤工人，。建筑工人") == "你要水电煤工人。建筑工人"
+        assert normalize_punct_cluster("什么技能、？什么软技能") == "什么技能？什么软技能"
+
+    def test_pause_after_terminal_removed(self):
+        assert normalize_punct_cluster("业务就是kpi。，这时候") == "业务就是kpi。这时候"
+
+    def test_adjacent_pause_keeps_first(self):
+        # 保留首个标点：前一个停顿决定了此处该用什么停顿
+        assert normalize_punct_cluster("包括愤怒、，悲伤") == "包括愤怒、悲伤"
+        assert normalize_punct_cluster("蛋白粉啊，，鱼油啊") == "蛋白粉啊，鱼油啊"
+
+    def test_stacked_terminal_collapsed(self):
+        assert normalize_punct_cluster("选择来念nba。。小的团体") == "选择来念nba。小的团体"
+
+    def test_mixed_mood_punct_kept(self):
+        # 「？！」「！？」是合法语气叠加，不是堆叠错误
+        assert normalize_punct_cluster("你确定吗？！") == "你确定吗？！"
+
+    def test_normal_sequence_untouched(self):
+        assert normalize_punct_cluster("第一，第二，第三。") == "第一，第二，第三。"
+
+
+class TestCjkHalfwidth:
+    """③ 汉字后紧跟的半角标点（normalize_en_punct 漏网的那一半）。"""
+
+    def test_comma_after_cjk(self):
+        assert normalize_cjk_halfwidth("循环在跑,并且自己判断") == "循环在跑，并且自己判断"
+
+    def test_comma_with_space_after_cjk(self):
+        assert normalize_cjk_halfwidth("发推特, 他们员工也鼓励") == "发推特， 他们员工也鼓励"
+
+    def test_colon_semicolon_after_cjk(self):
+        assert normalize_cjk_halfwidth("听听例子:塞利米耶清真寺") == "听听例子：塞利米耶清真寺"
+        assert normalize_cjk_halfwidth("社群教育代表; 用AI升职") == "社群教育代表； 用AI升职"
+
+    def test_terminal_halfwidth_at_line_end(self):
+        # 行内以汉字为主体时才转：时间戳、英文标题一类的行不动
+        assert normalize_cjk_halfwidth("感谢听众的耐心聆听!\n") == "感谢听众的耐心聆听！\n"
+
+    def test_english_enumeration_untouched(self):
+        # 西文列举句：下一个非空格字符是拉丁字母，整句保持原样
+        src = "Special Guests: Kolento, 林桐宇, and 饶杰武."
+        assert normalize_cjk_halfwidth(src) == src
+
+    def test_latin_comma_untouched(self):
+        assert normalize_cjk_halfwidth("Talk is cheap, show me the code") == (
+            "Talk is cheap, show me the code"
+        )
+
+    def test_ellipsis_becomes_chinese(self):
+        assert normalize_cjk_halfwidth("但对人类文明有...") == "但对人类文明有……"
+
+    def test_version_number_untouched(self):
+        assert normalize_cjk_halfwidth("版本号 v1.5 起") == "版本号 v1.5 起"
+
+
+class TestOrphanPunct:
+    """④ 句首错位：换行把标点甩到下一行行首。"""
+
+    def test_leading_pause_removed(self):
+        assert normalize_orphan_punct("上句完。\n\n，包括其实线下也有活动\n") == (
+            "上句完。\n\n包括其实线下也有活动\n"
+        )
+
+    def test_leading_pause_with_quote_marker(self):
+        assert normalize_orphan_punct("> ，以及线下的活动\n") == "> 以及线下的活动\n"
+
+    def test_wrapped_terminal_merged(self):
+        # 软换行导致句号掉到下一行首，应与前一行合并
+        assert normalize_orphan_punct("会出现生存困境\n。相比之下好一些\n") == (
+            "会出现生存困境。相比之下好一些\n"
+        )
+
+    def test_not_merged_when_prev_is_complete(self):
+        # 前一行已是完整句时合并会产生双句号，留给人工看
+        assert normalize_orphan_punct("前句已收尾。\n。后句也有句号\n") == (
+            "前句已收尾。\n。后句也有句号\n"
+        )
+
+    def test_not_merged_into_list_item(self):
+        assert normalize_orphan_punct("- 列表项没有结尾\n。接上去会错吗\n") == (
+            "- 列表项没有结尾\n。接上去会错吗\n"
+        )
+
+    def test_trailing_newline_preserved(self):
+        # 空行不能被误判为「以句末标点开头」而与上一行合并吃掉文末换行
+        assert normalize_orphan_punct("段落甲。\n") == "段落甲。\n"
+
+
+class TestPunctIntegration:
+    """四组合一的口径：计数与转换一致、幂等、Show Notes 不动。"""
+
+    def test_count_matches_conversion(self):
+        for src in (
+            "甲说这话， 然后走了",
+            "工人，。建筑工人",
+            "Special Guests: Kolento, and 饶杰武.",
+            "干净的一句话。",
+        ):
+            assert count_punct(src) == (0 if normalize_punct(src) == src else 1), src
+
+    def test_idempotent(self):
+        src = "他说完， 然后又说，、再补一句， 结束了。 "
+        once = normalize_punct(src)
+        assert normalize_punct(once) == once
+
+    def test_show_notes_skipped(self):
+        md = (
+            "## Show Notes\n\n"
+            "主持人说 hello， 这里有停顿空格， 别动它\n\n"
+            "## 摘要\n\n"
+            "这同一类是 witty， 应该被清掉\n"
+        )
+        out = normalize_markdown(md)
+        assert "主持人说 hello， 这里有停顿空格， 别动它" in out  # 源简介透传
+        assert "这同一类是 witty，应该被清掉" in out              # 校订范围内的标点被清
+
+    def test_section_punct_unified(self):
+        # 同一段里四类缺陷叠在一起时，都能清干净（数量与标点一并收敛）
+        md = (
+            "## 摘要\n\n"
+            "嘉宾提到 ABC， 然后说明 CD。、最后举了个例,收尾在十一分钟。\n"
+        )
+        out = normalize_markdown(md)
+        assert "ABC，然后说明 CD。" in out
+        assert "CD。、最后" not in out
+        assert "举了个例，收尾在11分钟。" in out
+

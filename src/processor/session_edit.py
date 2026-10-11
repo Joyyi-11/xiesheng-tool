@@ -507,6 +507,25 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
                 "确定性修复：`python -m src.processor.normalize <md> --apply`"
             )
 
+    # 原文转录：标点缺陷须为 0（2026-10-11 连漪问「标点问题能不能也交给脚本」后补的硬闸门）
+    # 成因四类，全是 ASR 标点/换行的机械后果，此前只能逐集手改：
+    #   ① 停顿空格（`要约件， 他由此`）② 堆叠冗余标点（`协作中、，然后`、`所述完毕，。另外`）
+    #   ③ 汉字后紧跟半角标点（`编码，并且运行`）④ 换行把标点甩到行首（`\n\n，包括其实线下`）。
+    # 确定性修复在 src.processor.normalize（normalize_punct），同走 `--apply`。
+    # **刻意不像半角/重复字闸门那样先剥 ``**``**：本规则的 pattern 不认星号，剥掉
+    # 反而会把 `**主持人Nina：** 嗨` 当成「冒号后多余空格」（实测两集 85 / 109 处假阳性），
+    # 宁可漏检 `**加粗** 。` 这种边角，也不能让干净稿交付被拦。
+    if transcript:
+        from src.processor.normalize import count_punct
+
+        _n_punct = count_punct(transcript)
+        if _n_punct:
+            problems.append(
+                f"原文转录区残留 {_n_punct} 处标点缺陷（全角标点两侧多余空格、"
+                "堆叠/冗余标点、汉字后的半角标点、标点被换行甩到行首）。"
+                "确定性修复：`python -m src.processor.normalize <md> --apply`"
+            )
+
     # 核心观点：位于句末的引用原话必须自带句末标点（句号在引号内）
     # 背景（2026-10-10）：既有条款只规定「观点句以句号收尾」，没管引用原话本身，
     # 于是每份稿都以「……主要干活的一些工作。」这类光秃秃的引语收尾，读到那里会断住。

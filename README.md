@@ -313,7 +313,7 @@ src/
 │   └── collapse_check.py           # 分离后塌缩检测（probe 未覆盖时的兜底）
 ├── processor/
 │   ├── prompt.py           # 忠实校订与提要生成提示词
-│   ├── normalize.py        # 文本归一化（中文读数日期/数量转阿拉伯数字 + 话轮末逗号转句号 + 核心观点句末引语句号）
+│   ├── normalize.py        # 文本归一化（中文读数日期/数量转阿拉伯数字 + 话轮末逗号转句号 + 核心观点句末引语句号 + ASR 标点缺陷清理）
 │   ├── llm_processor.py    # 并行分块校订、模型探测回退、校验、缓存与文稿整理
 │   ├── session_edit.py     # 会话内校订：固定规范提示词 + 结构校验器 + CLI
 │   ├── rebuild_transcript.py  # 会话包保真重建原文转录（防过度删减）

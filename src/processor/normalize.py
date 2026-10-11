@@ -115,6 +115,9 @@ _EN_PUNCT_MAP = {",": "，", ".": "。", "?": "？", "!": "！"}
 # 单字母（`c e o.` `p p t,`），故改为缩写白名单反向保护。
 _EN_PUNCT_RE = re.compile(r"([A-Za-z])(\*{0,2})([,.?!])(?![A-Za-z0-9])(?!\s+[A-Za-z])")
 
+# 汉字字元类（供下方标点规则拼字符组用；单个汉字的判断用已编译的 _CJK_RE）
+_CJK_CHAR = "\u4e00-\u9fff"
+
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 # 拉丁缩写：其句点属缩写本身，不能转成中文句号（转了就成 `e。g。`）。
@@ -161,6 +164,210 @@ def normalize_en_punct(text: str) -> str:
         return m.group(1) + m.group(2) + ch
 
     return _EN_PUNCT_RE.sub(_sub, text)
+
+
+# ============================================================
+# 标点清理（2026-10-11 定）：ASR 停顿与换行落成的空格 / 冗余 / 错位标点
+# ============================================================
+# 由来：全量 63 份成稿审计（排除 tmp_/lark-doc 临时件）暴露四类**可机械判定**的缺陷，
+# 此前只能逐集手改。四类各自的标准写法写在各条规则上方。
+#
+# 共同原则：**只删除不该存在的空格与重复标点，从不新增标点、不改写措辞**——
+# 与数量转换同守「宁可漏改也不错改」，错改会把原话改成别的意思。
+
+# 全角停顿/句末标点，参与空格与堆叠收敛的那一组
+_PUNCT_CJK = "，。！？、；："
+_PUNCT_PAUSE = "，、；："          # 停顿类（句末前多余、句末后多余都要删）
+_PUNCT_END = "。！？"             # 句末类（重复只留一个）
+
+# ------------------------------------------------------------
+# ① 停顿空格：ASR 在停顿处先留空格、后补全角标点，空格就夹在了标点两侧
+# ------------------------------------------------------------
+# 中文全角标点自带字身尾空，**其后不得再加空格**（中文—中文：必删）。
+# 中文—西文之间是否留空格各家不一，按库内压倒性惯例取「不留」：实测
+# 「标点后无空格 + 西文」1970 处 vs「标点后带空格 + 西文」132 处（93.7% 无空格）。
+# 标点前出现空格（`种种困惑 。`、`3 分钟 ：`）同样是错的，一并删。
+# 但有三类上下文必须放过（2026-10-11 全量干跑实测踩到的坑）：
+#   a. 来源行的 ` | ` 字段分隔符（`判断力？ | 2026-08-31`）、Markdown 表格剩余留白；
+#   b. 西文人名缩写（`R. F. Kuang` 被上一环 en_punct 转成 `R。 F。 Kuang` 后，
+#      句点间的空格若再删就成了 `R。F。Kuang`，可读性反而变差）；
+#   c. 英文句子/歌词整句被转成全角标点后的空格（`kid, you always have been` →
+#      `kid， you always...`，此时空格是英文书写所必须）。
+# 故拆成两条、判据更严：**后接汉字才一律删**；后接西文或数字仅在**标点前也是汉字**
+# 时才删（西文环境的空格一律保留）。
+_SPACE_AFTER_CJK_RE = re.compile(rf"([{_PUNCT_CJK}]) +(?=[{_CJK_CHAR}])")
+_SPACE_AFTER_LATIN_RE = re.compile(rf"(?<=[{_CJK_CHAR}])([{_PUNCT_CJK}]) +(?=[A-Za-z0-9])")
+_SPACE_BEFORE_RE = re.compile(rf"(?<=[{_CJK_CHAR}]) +(?=[{_PUNCT_CJK}])")
+
+# ------------------------------------------------------------
+# ② 堆叠标点：ASR 多标点连打 / 换行处前后标点叠加
+# ------------------------------------------------------------
+# 收敛方向一律**取首个标点**——前一个停顿决定了此处是什么性质的停顿：
+#   「包括愤怒、，悲伤」保留「、」→「包括愤怒、悲伤」；「但是当前，，因为」留「，」。
+# P2/P3 处理句末标点旁边的冗余停顿（「涉及面。，你肯定」「水电煤工人，。建筑工人」）；
+# P4 处理句末标点连打（「nba。。」）。**异形组合不动**——「？！」「！？」是合法语气叠加。
+_CLUSTER_STEPS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(rf"[{_PUNCT_PAUSE}]+(?=[{_PUNCT_END}])"), ""),      # P2 句末标点前
+    (re.compile(rf"(?<=[{_PUNCT_END}])[{_PUNCT_PAUSE}]+"), ""),     # P3 句末标点后
+    (re.compile(r"([，、])[，、]+"), r"\1"),                          # P1 相邻同类停顿
+    (re.compile(r"([。！？])\1+"), r"\1"),                           # P4 句末标点堆叠
+)
+
+# ------------------------------------------------------------
+# ③ 中文语境里的半角残留
+# ------------------------------------------------------------
+# normalize_en_punct 只管「字母后」的半角标点（`Node.js` `v1.5` `Talk is cheap,`）；
+# **汉字后**紧跟的半角（`循环在跑,并且`、`发推特, 他们`、`游说说:塞利米耶`、`聆听!`）
+# 落在它的判据之外，实测 63 份稿共 12 处靠人工才发现。本规则补这一段。
+#
+# 判据（三层，一层比一层严，避免把西文整句误改成中文）：
+#   1. 标点前一个字符必须是汉字；
+#   2. 标点后第一个非空格字符必须是**汉字**；若已到行尾，则要求整行以汉字为主体
+#      （该行汉字数 ≥ 拉丁字母数）——「何找到志同道合的搭子?」过，
+#      「Special Guests: Kolento, 林桐宇, and 饶杰武.」不过（西文列举句，整句保持原样）；
+#   3. 行尾的情形还要看行为主线，如上。
+# 英文列举（`Kolento, 林桐宇, and`）、时间/版本号（`12:30` `v1.5`）因此都不会被碰。
+_CJK_HALF_MAP = {",": "，", ".": "。", "?": "？", "!": "！", ";": "；", ":": "："}
+_CJK_HALF_RE = re.compile(rf"([{_CJK_CHAR}])( *[,.?!;:])")
+
+# 三点/六点省略号单独收：中文语境应作「……」（GB/T 15834 用两个省略号字符）。
+# 要求标点前是汉字、其后不紧跟字母数字（`v1...` `wait...` 之类留给西文）。
+_CJK_ELLIPSIS_RE = re.compile(rf"(?<=[{_CJK_CHAR}])\.{{3,}}(?![A-Za-z0-9])")
+
+# ④ 句首错位标点：换行把标点甩到了下一行行首（`\n\n，包括其实线下`、`\n。相比之下`）
+_LEAD_PAUSE_RE = re.compile(r"^([ \t>]*)[，、；：]+")
+
+
+def _line_cjk_dominant(text: str, pos: int) -> bool:
+    """``pos`` 所在整行是否以汉字为主体（汉字数 ≥ 拉丁字母数）。
+
+    给「标点后已到行尾」的半角标点兜第 2 层判据：只有中文主体的行，
+    其行末半角标点才是 ASR 漏网的中文标点。
+    """
+    start = text.rfind("\n", 0, pos) + 1
+    end = text.find("\n", pos)
+    if end < 0:
+        end = len(text)
+    line = text[start:end]
+    n_cjk = len(_CJK_RE.findall(line))
+    n_lat = len(re.findall(r"[A-Za-z]", line))
+    return n_cjk >= n_lat
+
+
+def _cjk_half_ok(text: str, pos: int) -> bool:
+    """``pos`` 处的半角标点是否处在中文语境里（判据合一，转换与计数共用）。"""
+    i = pos + 1
+    n = len(text)
+    while i < n and text[i] in " \t":
+        i += 1
+    if i < n and _CJK_RE.match(text[i]):
+        return True
+    if i >= n or text[i] == "\n":
+        return _line_cjk_dominant(text, pos)
+    return False
+
+def normalize_punct_space(text: str) -> str:
+    """① 清理紧贴全角标点的多余空格（ASR 停顿空格残留）。
+
+    「量化取样， 然后」→「量化取样，然后」；「种种困惑 。」→「种种困惑。」。
+    中文—中文之间必删；中文标点—西文之间按库内 93.7% 的无空格惯例也删。
+    """
+    if not text:
+        return text
+    text = _SPACE_AFTER_CJK_RE.sub(r"\1", text)
+    text = _SPACE_AFTER_LATIN_RE.sub(r"\1", text)
+    return _SPACE_BEFORE_RE.sub("", text)
+
+
+def normalize_punct_cluster(text: str) -> str:
+    """② 收敛堆叠/重复的标点（ASR 多标点连打、换行处前后标点叠加）。"""
+    if not text:
+        return text
+    for pat, repl in _CLUSTER_STEPS:
+        text = pat.sub(repl, text)
+    return text
+
+
+def normalize_cjk_halfwidth(text: str) -> str:
+    """③ 汉字后紧跟的半角标点转全角（``normalize_en_punct`` 漏网的那一半）。"""
+    if not text:
+        return text
+    text = _CJK_ELLIPSIS_RE.sub("……", text)
+
+    def _sub(m: re.Match[str]) -> str:
+        pos = m.start(2) + len(m.group(2)) - 1
+        if not _cjk_half_ok(text, pos):
+            return m.group(0)
+        return m.group(1) + " " * (len(m.group(2)) - 1) + _CJK_HALF_MAP[m.group(2)[-1]]
+
+    return _CJK_HALF_RE.sub(_sub, text)
+
+
+def normalize_orphan_punct(block: str) -> str:
+    """④ 句首错位标点：换行把标点甩到下一行行首时收回。
+
+    两种形态，处置不同：
+      - 行首是停顿标点（`，包括其实线下`、`> ，以及`）——段落绝无可能以逗号起头，
+        直接删（`->` 引用标记与缩进保留）；
+      - 行首是句末标点（`\n。相比之下`、`\n。值得欣慰的是`）——换行是软换行，
+        与前一行合并，让句号回到前一句末尾。前一行已是完整句（以句末标点收尾）
+        或是列表项、标题时不合并，交给人工看。
+    """
+    if not block:
+        return block
+    out: list[str] = []
+    for line in block.split("\n"):
+        # 形态一：行首停顿标点 → 直接删（保留缩进与 > 引用标记）
+        line = _LEAD_PAUSE_RE.sub(r"\1", line)
+        # 判空必须用显式长度判断：`"" in "。！？"` 恒为 True（空串是任何串的子串），
+        # 会让末尾空行被误判成「以句末标点开头」而与前一行合并，吃掉文末换行。
+        lead = line.lstrip()
+        if lead and lead[0] in _PUNCT_END:
+            prev = out[-1].rstrip() if out else ""
+            joinable = (
+                prev
+                and not prev[-1:] in _PUNCT_END
+                and prev[-1:] not in "…”）」】"
+                and not re.match(r"^\s*([-*>#|]|\d+[.)、])", prev)
+            )
+            if joinable:
+                out[-1] = prev + lead
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def normalize_punct(text: str) -> str:
+    """四类标点缺陷一并清（①→④ 的执行顺序写在函数体内）。
+
+    顺序有讲究：先做行结构上的句首错位收回（否则换行会把标点拆到两行、后续
+    规则看不见），再补汉字后半角（在此之前正常化，好让全角标点随后参与聚类），
+    最后是聚类与空格清理（收尾清理前面几步留下的新例子）。
+    """
+    if not text:
+        return text
+    text = normalize_orphan_punct(text)
+    text = normalize_cjk_halfwidth(text)
+    text = normalize_punct_cluster(text)
+    return normalize_punct_space(text)
+
+
+def count_punct(text: str) -> int:
+    """待清标点缺陷数（四类合计）。转换与计数共用同一组 pattern，避免口径漂移。"""
+    if not text:
+        return 0
+    n = (
+        len(_SPACE_AFTER_CJK_RE.findall(text))
+        + len(_SPACE_AFTER_LATIN_RE.findall(text))
+        + len(_SPACE_BEFORE_RE.findall(text))
+    )
+    n += len(_CJK_ELLIPSIS_RE.findall(text))
+    n += sum(len(p.findall(text)) for p, _r in _CLUSTER_STEPS)
+    n += sum(1 for m in _CJK_HALF_RE.finditer(text) if _cjk_half_ok(text, m.start(2) + len(m.group(2)) - 1))
+    for line in text.split("\n"):
+        if _LEAD_PAUSE_RE.match(line):
+            n += 1
+    return n
 
 
 # ============================================================
@@ -572,6 +779,61 @@ def sync_handoff_quotes(doc: dict, quotes: list[str]) -> int:
     return hits
 
 
+def repair_stale_anchors(doc: dict, md_text: str) -> int:
+    """把已无法在成稿里定位的 ``anchor`` 重新对齐，返回修复条数。
+
+    ``anchor`` 是转录逐字锚点，理想情况应与 md 一字不差；但成稿侧已被确定性清洗过
+    （数量转阿拉伯、标点清理、话轮末句号），anchor 若仍是清洗前的形态就会**失效**——
+    ``bold_anchors`` 回标时定位不到，引用链静默断掉（实测 63 集里已断了 9 处，
+    其中 6 处是上一轮只转 md 未同步 anchor 留下的旧伤）。
+
+    只给**定位不到的** anchor 施加同一套清洗（能定位的一律不动）：逐字保真优先于美观，
+    最小干预优先于统一格式。
+    """
+    n = 0
+    for sec in ("key_points", "questions"):
+        for item in doc.get(sec) or []:
+            v = item.get("anchor")
+            if not isinstance(v, str) or not v or v in md_text:
+                continue
+            for cand in (
+                normalize_punct(v),
+                normalize_cn_number(normalize_punct(v)),
+                merge_repeat_chars(normalize_cn_number(normalize_punct(v))),
+            ):
+                if cand in md_text:
+                    item["anchor"] = cand
+                    n += 1
+                    break
+    return n
+
+
+def sync_handoff_punct(doc: dict) -> int:
+    """把 handoff 文本字段的标点清理一遍，返回改动处数。
+
+    字段集合与 ``_sync_handoff_numbers`` 一致（``point/evidence/quote/question/answer``），
+    ``anchor`` 交由 :func:`repair_stale_anchors` 按需最小修复，不在此统一改。
+    """
+    n = 0
+    for kp in doc.get("key_points") or []:
+        for key in ("point", "evidence", "quote"):
+            v = kp.get(key)
+            if isinstance(v, str) and v:
+                new = normalize_punct(v)
+                if new != v:
+                    kp[key] = new
+                    n += 1
+    for q in doc.get("questions") or []:
+        for key in ("question", "answer"):
+            v = q.get(key)
+            if isinstance(v, str) and v:
+                new = normalize_punct(v)
+                if new != v:
+                    q[key] = new
+                    n += 1
+    return n
+
+
 def _sync_handoff_numbers(doc: dict) -> int:
     """把 handoff 文本字段的中文读数数量转阿拉伯数字，返回改动处数。
 
@@ -624,7 +886,9 @@ def _iter_blocks(md: str) -> list[tuple[str, str, str]]:
 
 def _clean_block(block: str, head: str = "") -> str:
     block = merge_repeat_chars(
-        normalize_cn_date(normalize_cn_number(normalize_en_punct(block)))
+        normalize_punct(
+            normalize_cn_date(normalize_cn_number(normalize_en_punct(block)))
+        )
     )
     if head == _KEY_POINT_HEAD:
         block = normalize_quote_period(block)
@@ -668,14 +932,20 @@ def count_changes(md: str) -> tuple[int, int]:
 
 
 def count_all(md: str) -> dict[str, int]:
-    """返回待改数量 ``{en_punct, repeat, cn_date, cn_number, quote_period}``，``## Show Notes`` 不计入。
+    """返回待改数量 ``{en_punct, repeat, cn_date, cn_number, quote_period, punct}``，``## Show Notes`` 不计入。
 
-    比 ``count_changes`` 多了日期、数量与引语句末标点三项；单独开一个新函数而非
-    改旧签名，避免牵动 ``finish_phase_b`` / ``output_quality`` 等既有调用方。
+    比 ``count_changes`` 多了日期、数量、引语句末标点与标点清理四项；单独开一个新
+    函数而非改旧签名，避免牵动 ``finish_phase_b`` / ``output_quality`` 等既有调用方。
     """
     if not md:
-        return {"en_punct": 0, "repeat": 0, "cn_date": 0, "cn_number": 0, "quote_period": 0}
-    out = {"en_punct": 0, "repeat": 0, "cn_date": 0, "cn_number": 0, "quote_period": 0}
+        return {
+            "en_punct": 0, "repeat": 0, "cn_date": 0, "cn_number": 0,
+            "quote_period": 0, "punct": 0,
+        }
+    out = {
+        "en_punct": 0, "repeat": 0, "cn_date": 0, "cn_number": 0,
+        "quote_period": 0, "punct": 0,
+    }
     for _raw, head, body in _iter_blocks(md):
         if head.startswith(_SKIP_SECTIONS):
             continue
@@ -684,6 +954,7 @@ def count_all(md: str) -> dict[str, int]:
         out["repeat"] += rp
         out["cn_date"] += count_cn_date(body)
         out["cn_number"] += count_cn_number(body)
+        out["punct"] += count_punct(body)
         if head == _KEY_POINT_HEAD:
             out["quote_period"] += count_quote_period(body)
     return out
@@ -712,6 +983,7 @@ def main() -> int:
     hits_en, hits_rp = counts["en_punct"], counts["repeat"]
     hits_date, hits_number = counts["cn_date"], counts["cn_number"]
     hits_quote = counts["quote_period"]
+    hits_punct = counts["punct"]
 
     # 承接残句不自动改，单独列出来交人工回原文补全
     quote_manual: list[str] = []
@@ -726,12 +998,16 @@ def main() -> int:
     print(f"待转中文读数日期: {hits_date} 处")
     print(f"待转中文读数数量: {hits_number} 处")
     print(f"待补引语句末标点: {hits_quote} 处")
+    print(f"待清标点缺陷(空格/堆叠/半角/错位): {hits_punct} 处")
     if quote_manual:
         print(f"\n需人工判断的承接残句 {len(quote_manual)} 处（不自动补）：")
         for q in quote_manual:
             print(f"  「{q}」")
 
-    if hits_en == 0 and hits_rp == 0 and hits_date == 0 and hits_number == 0 and not quote_fixable:
+    if (
+        hits_en == 0 and hits_rp == 0 and hits_date == 0 and hits_number == 0
+        and hits_punct == 0 and not quote_fixable
+    ):
         print("\n无需改动。")
         return 0
     if not args.apply:
@@ -752,7 +1028,9 @@ def main() -> int:
     doc = json.loads(handoff.read_text(encoding="utf-8"))
     n = sync_handoff_quotes(doc, quote_fixable)
     n_num = _sync_handoff_numbers(doc)
-    if n or n_num:
+    n_punct = sync_handoff_punct(doc)
+    n_anchor = repair_stale_anchors(doc, new_md)
+    if n or n_num or n_punct or n_anchor:
         h_bak = handoff.with_suffix(handoff.suffix + ".bak")
         if not h_bak.exists():
             shutil.copy2(handoff, h_bak)
@@ -762,7 +1040,11 @@ def main() -> int:
             parts.append(f"quote {n} 处")
         if n_num:
             parts.append(f"数量 {n_num} 处")
-        print(f"已同步 {handoff.name} 的 {'、'.join(parts)}（备份 {h_bak.name}；anchor 未动）")
+        if n_punct:
+            parts.append(f"标点 {n_punct} 处")
+        if n_anchor:
+            parts.append(f"失效 anchor 重定位 {n_anchor} 处")
+        print(f"已同步 {handoff.name} 的 {'、'.join(parts)}（备份 {h_bak.name}）")
     return 0
 
 
