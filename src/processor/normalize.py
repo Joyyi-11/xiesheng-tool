@@ -4,9 +4,11 @@ These enforce project house-style rules that should apply regardless of whether
 the LLM post-processing step is used (e.g. when running with --llm-mode session and doing
 manual in-session editing).
 
-除 ``normalize_quotes``（转录落盘时调用）外，本模块还承载两条**纯机械**的成稿级
-规范：``normalize_en_punct``（外文词后的半角标点转全角）与 ``merge_repeat_chars``
-（≥3 连同字合并，拟声与应答叠用除外）。二者合为 ``normalize_markdown``，供：
+除 ``normalize_quotes``（转录落盘时调用）外，本模块还承载四条**纯机械**的成稿级
+规范：``normalize_en_punct``（外文词后的半角标点转全角）、``merge_repeat_chars``
+（≥3 连同字合并，拟声与应答叠用除外）、``normalize_cn_date``（中文读数日期转
+阿拉伯数字）与 ``normalize_quote_period``（核心观点句末引用原话补句末标点）。
+四者合为 ``normalize_markdown``，供：
 
     python -m src.processor.normalize "output/xxx.md"          # 干跑，只报改动数
     python -m src.processor.normalize "output/xxx.md" --apply  # 落盘（自动 .bak）
@@ -18,11 +20,15 @@ manual in-session editing).
 处。同一批规则必须只实现一次、由代码确定性执行，不依赖 LLM 在长文里自觉守约，
 也不靠每集脚本各自记得带上。新集校订的确定性清洗一律调用本模块，不在 oneoff
 脚本里重复实现。
+
+``--apply`` 会顺带同步同名 ``_handoff.json`` 的 ``key_points[].quote``（``anchor``
+不动）——核心观点是从 handoff 重渲染的，只改 md 会在下次重跑时被覆盖回去。
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import sys
@@ -302,6 +308,111 @@ def count_cn_date(text: str) -> int:
 
 
 # ============================================================
+# 核心观点：句末引用原话自带句末标点（rules.STRUCT_KEY_POINT 的确定性落地）
+# ============================================================
+
+# 校订出来的核心观点常以一句引用原话收尾，而那句引语不带句末标点：
+#
+#     ……因为流量会真的涌进来。「互联网上的大多数操作都会由 Agent 来完成」
+#
+# 读到那里会断住——它看着像半句话。完整引用应是「……由 Agent 来完成。」，
+# 句号在引号**之内**（疑问句用问号）。
+#
+# 不能对全文盲补：核心观点里大量引语是嵌在句中的短语（工作的基本单位从
+# 「职位」变为「任务」），补句号就成了病句。所以判据刻意窄——**只看位于句末
+# （引号后即换行/条目结尾）且自身不以句末标点收尾的引语**，这一类机械可判，
+# 不会误伤嵌入式短语。
+#
+# 以承接连词（而/但/却/以及……）开头的引语是**残句**：原话本身就从半句开始，
+# 补上句号仍不是完整句子。这类不自动改，只报出来交人工回原文补全。
+_QUOTE_RE = re.compile(r"「([^」]*)」")
+_QUOTE_END_PUNCT = "。？！.?!"
+_QUOTE_INTERROGATIVE = ("吗", "呢", "？", "?")
+_QUOTE_LEADING_CONNECTORS = ("而", "但", "却", "以及", "还是", "或", "所以", "就是")
+
+# 只对这一节生效：条款写在 STRUCT_KEY_POINT 下，别处（摘要、Show Notes）不适用
+_KEY_POINT_HEAD = "## 核心观点"
+
+
+def _quote_end_mark(quote: str) -> str:
+    """疑问句用问号，其余用句号——只补句号会把「……要我试着修一下吗」压成陈述句。"""
+    return "？" if quote.endswith(_QUOTE_INTERROGATIVE) else "。"
+
+
+def _quote_at_sentence_end(block: str, end: int) -> bool:
+    """``」`` 之后紧接换行或块结束 → 该引语独立处于句末。
+
+    不能用 ``(. )`` 去接尾部字符：``.`` 不匹配换行，会把句末那处整片漏掉。
+    """
+    return end >= len(block) or block[end] in "\r\n"
+
+
+def _iter_bad_quotes(block: str):
+    """产出块内「位于句末且缺句末标点」的引语 ``(match, quote)``。"""
+    for m in _QUOTE_RE.finditer(block or ""):
+        quote = m.group(1)
+        if not quote or quote[-1] in _QUOTE_END_PUNCT:
+            continue
+        if not _quote_at_sentence_end(block, m.end()):
+            continue
+        if block[m.end(): m.end() + 1] in ("。", "？", "！"):
+            continue
+        yield m, quote
+
+
+def scan_quote_period(block: str) -> tuple[list[str], list[str]]:
+    """返回 ``(可自动补句号的完整句, 需人工判断的承接残句)``。"""
+    fixable: list[str] = []
+    manual: list[str] = []
+    for _m, quote in _iter_bad_quotes(block):
+        if quote in fixable or quote in manual:
+            continue
+        (manual if quote.startswith(_QUOTE_LEADING_CONNECTORS) else fixable).append(quote)
+    return fixable, manual
+
+
+def normalize_quote_period(block: str) -> str:
+    """核心观点块里句末的引用原话补上句末标点（写进引号内）。承接残句不动。"""
+    if not block:
+        return block
+    out: list[str] = []
+    last = 0
+    done: set[str] = set()
+    for m, quote in _iter_bad_quotes(block):
+        if quote.startswith(_QUOTE_LEADING_CONNECTORS) or quote in done:
+            continue
+        # m.end() 落在后引号之后：回退一格把句末标点放进引号内，避免写成「…」。」
+        out.append(block[last: m.end() - 1])
+        out.append(_quote_end_mark(quote) + CORNER_CLOSE)
+        last = m.end()
+        done.add(quote)  # 同名第二次出现按嵌入式短语处理，不改
+    out.append(block[last:])
+    return "".join(out)
+
+
+def count_quote_period(block: str) -> int:
+    """待补句末标点的引语处数（含承接残句——脚本不改，但要报出来给人看）。"""
+    return sum(1 for _ in _iter_bad_quotes(block or ""))
+
+
+def sync_handoff_quotes(doc: dict, quotes: list[str]) -> int:
+    """同步 handoff 的 ``key_points[].quote`` 句末标点，返回改动处数。
+
+    ``anchor`` 一律不动：它是原文转录里的加粗回标锚点，必须与转录逐字一致。
+    只改 md 而不改 handoff，下次 Phase B 从 handoff 重渲染上层章节时会被覆盖回去。
+    """
+    targets = set(quotes)
+    hits = 0
+    for kp in doc.get("key_points") or []:
+        q = kp.get("quote")
+        if isinstance(q, str) and q in targets:
+            kp["quote"] = q + _quote_end_mark(q)
+            targets.discard(q)
+            hits += 1
+    return hits
+
+
+# ============================================================
 # 成稿级入口：跳过 Show Notes（节目源简介透传，不归校订管）
 # ============================================================
 
@@ -309,24 +420,37 @@ _SECTION_RE = re.compile(r"^(##\s+.+?)\s*$", re.MULTILINE)
 _SKIP_SECTIONS = ("## Show Notes",)
 
 
-def _clean_block(block: str) -> str:
-    return merge_repeat_chars(normalize_cn_date(normalize_en_punct(block)))
+def _iter_blocks(md: str) -> list[tuple[str, str, str]]:
+    """按 ``## 标题`` 切块，产出 ``[(标题原文, 标题文本, 正文), ...]``。
+
+    前言的标题为 ``""``。标题原文单独保留（含行尾空白）——拼接时原样回填，
+    清洗只作用于正文，避免切块改写把格式弄乱。
+    """
+    marks = list(_SECTION_RE.finditer(md))
+    if not marks:
+        return [("", "", md)]
+    blocks = [("", "", md[: marks[0].start()])]
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(md)
+        blocks.append((m.group(0), m.group(1), md[m.end(): end]))
+    return blocks
+
+
+def _clean_block(block: str, head: str = "") -> str:
+    block = merge_repeat_chars(normalize_cn_date(normalize_en_punct(block)))
+    if head == _KEY_POINT_HEAD:
+        block = normalize_quote_period(block)
+    return block
 
 
 def normalize_markdown(md: str) -> str:
-    """对成稿跑两条确定性规范，``## Show Notes`` 小节原样透传。"""
+    """对成稿跑确定性规范，``## Show Notes`` 小节原样透传。"""
     if not md:
         return md
-    marks = list(_SECTION_RE.finditer(md))
-    if not marks:
-        return _clean_block(md)
-
-    out: list[str] = [_clean_block(md[: marks[0].start()])]
-    for i, m in enumerate(marks):
-        end = marks[i + 1].start() if i + 1 < len(marks) else len(md)
-        head, body = m.group(1), md[m.end(): end]
-        out.append(m.group(0))
-        out.append(body if head.startswith(_SKIP_SECTIONS) else _clean_block(body))
+    out: list[str] = []
+    for raw_head, head, body in _iter_blocks(md):
+        out.append(raw_head)
+        out.append(body if head.startswith(_SKIP_SECTIONS) else _clean_block(body, head))
     return "".join(out)
 
 
@@ -343,51 +467,48 @@ def count_changes(md: str) -> tuple[int, int]:
     """返回成稿 (半角标点待转数, ≥3 连待合并数)，``## Show Notes`` 不计入。"""
     if not md:
         return 0, 0
-    marks = list(_SECTION_RE.finditer(md))
     hits_en = hits_rp = 0
-    blocks = [md[: marks[0].start()]] if marks else [md]
-    for i, m in enumerate(marks):
-        end = marks[i + 1].start() if i + 1 < len(marks) else len(md)
-        head, body = m.group(1), md[m.end(): end]
-        if not head.startswith(_SKIP_SECTIONS):
-            blocks.append(body)
-    for b in blocks:
-        en, rp = count_text(b)
+    for _raw, head, body in _iter_blocks(md):
+        if head.startswith(_SKIP_SECTIONS):
+            continue
+        en, rp = count_text(body)
         hits_en += en
         hits_rp += rp
     return hits_en, hits_rp
 
 
 def count_all(md: str) -> dict[str, int]:
-    """返回三类待改数量 ``{en_punct, repeat, cn_date}``，``## Show Notes`` 不计入。
+    """返回四类待改数量 ``{en_punct, repeat, cn_date, quote_period}``，``## Show Notes`` 不计入。
 
-    比 ``count_changes`` 多了日期项；单独开一个新函数而非改旧签名，避免牵动
-    ``finish_phase_b`` / ``output_quality`` 等既有调用方。
+    比 ``count_changes`` 多了日期与引语句末标点两项；单独开一个新函数而非改旧
+    签名，避免牵动 ``finish_phase_b`` / ``output_quality`` 等既有调用方。
     """
     if not md:
-        return {"en_punct": 0, "repeat": 0, "cn_date": 0}
-    marks = list(_SECTION_RE.finditer(md))
-    blocks = [md[: marks[0].start()]] if marks else [md]
-    for i, m in enumerate(marks):
-        end = marks[i + 1].start() if i + 1 < len(marks) else len(md)
-        head, body = m.group(1), md[m.end(): end]
-        if not head.startswith(_SKIP_SECTIONS):
-            blocks.append(body)
-    out = {"en_punct": 0, "repeat": 0, "cn_date": 0}
-    for b in blocks:
-        en, rp = count_text(b)
+        return {"en_punct": 0, "repeat": 0, "cn_date": 0, "quote_period": 0}
+    out = {"en_punct": 0, "repeat": 0, "cn_date": 0, "quote_period": 0}
+    for _raw, head, body in _iter_blocks(md):
+        if head.startswith(_SKIP_SECTIONS):
+            continue
+        en, rp = count_text(body)
         out["en_punct"] += en
         out["repeat"] += rp
-        out["cn_date"] += count_cn_date(b)
+        out["cn_date"] += count_cn_date(body)
+        if head == _KEY_POINT_HEAD:
+            out["quote_period"] += count_quote_period(body)
     return out
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="成稿确定性规范化（外文词后半角标点转全角 + ≥3 连重复字合并 + 中文读数日期转阿拉伯数字，不调 LLM）"
+        description="成稿确定性规范化（外文词后半角标点转全角 + ≥3 连重复字合并 + 中文读数日期转阿拉伯数字 + 核心观点引语句末标点，不调 LLM）"
     )
     ap.add_argument("md_path", type=Path, help="成稿 .md 路径")
     ap.add_argument("--apply", action="store_true", help="写回文件（自动 .bak 备份）")
+    ap.add_argument(
+        "--no-handoff",
+        action="store_true",
+        help="不改同名 _handoff.json（默认会同步 key_points[].quote）",
+    )
     args = ap.parse_args()
 
     if not args.md_path.exists():
@@ -397,13 +518,27 @@ def main() -> int:
     md = args.md_path.read_text(encoding="utf-8")
     new_md = normalize_markdown(md)
     counts = count_all(md)
-    hits_en, hits_rp, hits_date = counts["en_punct"], counts["repeat"], counts["cn_date"]
+    hits_en, hits_rp = counts["en_punct"], counts["repeat"]
+    hits_date, hits_quote = counts["cn_date"], counts["quote_period"]
+
+    # 承接残句不自动改，单独列出来交人工回原文补全
+    quote_manual: list[str] = []
+    quote_fixable: list[str] = []
+    for _raw, head, body in _iter_blocks(md):
+        if head == _KEY_POINT_HEAD:
+            quote_fixable, quote_manual = scan_quote_period(body)
 
     print(f"文件: {args.md_path.name}")
     print(f"待转半角标点: {hits_en} 处")
     print(f"待合并 ≥3 连重复字: {hits_rp} 处")
     print(f"待转中文读数日期: {hits_date} 处")
-    if hits_en == 0 and hits_rp == 0 and hits_date == 0:
+    print(f"待补引语句末标点: {hits_quote} 处")
+    if quote_manual:
+        print(f"\n需人工判断的承接残句 {len(quote_manual)} 处（不自动补）：")
+        for q in quote_manual:
+            print(f"  「{q}」")
+
+    if hits_en == 0 and hits_rp == 0 and hits_date == 0 and not quote_fixable:
         print("\n无需改动。")
         return 0
     if not args.apply:
@@ -415,6 +550,21 @@ def main() -> int:
         shutil.copy2(args.md_path, bak)
     args.md_path.write_text(new_md, encoding="utf-8")
     print(f"\n已写回 {args.md_path.name}（备份 {bak.name}）")
+
+    if args.no_handoff or not quote_fixable:
+        return 0
+    handoff = args.md_path.with_name(args.md_path.name[: -len(".md")] + "_handoff.json")
+    if not handoff.exists():
+        return 0
+    doc = json.loads(handoff.read_text(encoding="utf-8"))
+    n = sync_handoff_quotes(doc, quote_fixable)
+    if not n:
+        return 0
+    h_bak = handoff.with_suffix(handoff.suffix + ".bak")
+    if not h_bak.exists():
+        shutil.copy2(handoff, h_bak)
+    handoff.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"已同步 {handoff.name} 的 quote {n} 处（备份 {h_bak.name}；anchor 未动）")
     return 0
 
 

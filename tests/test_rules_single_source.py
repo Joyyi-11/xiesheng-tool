@@ -37,16 +37,18 @@ def test_opening_rule_reaches_both_chains():
 
 def test_struct_key_point_mentions_opening_as_source_material():
     # 连漪：片头精华可作为核心观点、亮点句的参考来源
-    assert "片头精华/金句预告是提炼素材" in rules.STRUCT_KEY_POINT
+    # v25 措辞收紧为「只作线索」——预告可以启发提炼，但不能据它改写正文观点
+    assert "片头精华/金句预告只作线索" in rules.STRUCT_KEY_POINT
     # 两链路的结构化提示词都引用该口径
-    assert "片头精华/金句预告是提炼素材" in STRUCT_SYSTEM_PROMPT
-    assert "片头精华/金句预告是提炼素材" in SESSION_RULES
+    assert "片头精华/金句预告只作线索" in STRUCT_SYSTEM_PROMPT
+    assert "片头精华/金句预告只作线索" in SESSION_RULES
 
 
 def test_versions_track_shared_rules_version():
     # session 版本号引用 rules；api 的 CLEAN/STRUCT 缓存版本同源（见 llm_processor）
     assert SESSION_SPEC_VERSION == rules.RULES_SPEC_VERSION
-    assert rules.RULES_SPEC_VERSION == 24
+    # 不写死具体数字：规则升版只改 rules.py，这条断言不必跟着改
+    assert rules.RULES_SPEC_VERSION >= 25
 
 
 def test_en_punct_and_repeat_rules_are_deterministic_backed():
@@ -107,10 +109,12 @@ def test_session_rules_embed_shared_edit_rules_textually():
 def test_struct_rules_reach_session_structure_section():
     # 会话链路「输出结构」引用共享 STRUCT 口径（摘要/核心观点/问题/术语表/人物简介）
     for text in (
-        "基于全文但不照搬原文",
-        "观点句必须是完整陈述句",
+        # v25 摘要口径改写：从「基于全文但不照搬原文」变成「做底层逻辑提炼」
+        "做底层逻辑提炼",
+        "观点句须为完整陈述句",
         "首次出现须写明「姓名（身份/头衔）」",
-        "排除播客名、节目名、嘉宾姓名、平台名",
+        # v25 术语表归属条改写：明确列出不进术语表的专名
+        "播客名、节目名、嘉宾姓名、平台名等专名一律不进术语表",
         "正文格式（**姓名**：简介）",
     ):
         assert text in SESSION_RULES

@@ -118,7 +118,7 @@ def _build_session_rules() -> str:
 ## 核心观点
 
 - **观点句。**展开论述句（1-2 句）「值得单独收录的原话」
-  - **观点内特有术语**：1-2 句就近解释。
+  - **观点内特有术语**，1-2 句就近解释。
 （{STRUCT_KEY_POINT}）
 
 ## 术语表
@@ -475,6 +475,35 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
             problems.append(
                 f"原文转录区残留 {_n_rp} 处 ≥3 连重复字（应合并为一个；2 连与拟声、应答叠用保留）。"
                 "确定性修复：`python -m src.processor.normalize <md> --apply`"
+            )
+
+    # 核心观点：位于句末的引用原话必须自带句末标点（句号在引号内）
+    # 背景（2026-10-10）：既有条款只规定「观点句以句号收尾」，没管引用原话本身，
+    # 于是每份稿都以「……主要干活的一些工作。」这类光秃秃的引语收尾，读到那里会断住。
+    # 确定性修复在 src/processor/normalize.py（normalize_quote_period），
+    # 与另外三条规范同走 `python -m src.processor.normalize <md> --apply`。
+    # 判据刻意窄——只看「句末」（引号后即换行/条目结束）：
+    # 嵌入自己句子里的短语引述（从「职位」变为「任务」）本就不该带句号，不能误报。
+    # 以「而/但/却」等承接连词开头的引语是残句，脚本也不改（补句号仍不是完整句），
+    # 这里照样报警——那类要回原文把整句话补出来。
+    _kp = sections.get("## 核心观点", "")
+    if _kp:
+        _bad_quotes: list[str] = []
+        for _m in re.finditer(r"「([^」]*)」", _kp):
+            _q = _m.group(1)
+            if _q and _q[-1] in "。？！.?!":
+                continue
+            # 注意：不能用 `(. )` 去接尾部字符——`.` 不匹配换行，会把句末那处整个漏掉
+            _after = _kp[_m.end():_m.end() + 1]
+            if _after in ("", "\r", "\n", "。", "？", "！"):
+                _bad_quotes.append(_q)
+        if _bad_quotes:
+            _sample = "；".join(f"「{q}」" for q in _bad_quotes[:3])
+            problems.append(
+                f"核心观点有 {len(_bad_quotes)} 处位于句末的引用原话缺少句末标点（例：{_sample}）。"
+                "收尾的引用是完整句子，句号须写在引号之内（「……。」，疑问句用「……？」）；"
+                "完整句可确定性修复：`D:/Python311/python.exe -m src.processor.normalize <md> --apply`"
+                "（会同步 _handoff.json 的 quote）；承接连词开头的残句需回原文补全整句。"
             )
 
     if source_text and transcript:

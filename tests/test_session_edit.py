@@ -1,5 +1,6 @@
 """Tests for deterministic in-session transcript editing."""
 
+from src.processor.rules import RULES_SPEC_VERSION
 from src.processor.session_edit import (
     REQUIRED_HEADINGS,
     SESSION_RULES,
@@ -61,7 +62,9 @@ GOLDEN = """# 174. 我们还能给算法当多久的品味老师？｜对谈亚�
 
 
 def test_session_rules_are_versioned():
-    assert SESSION_SPEC_VERSION == 24
+    # 版本跟着 rules 走：规则升版时改 rules.py 即可，这条断言不必跟着改数字
+    assert SESSION_SPEC_VERSION == RULES_SPEC_VERSION
+    assert SESSION_SPEC_VERSION >= 25
 
 
 def test_build_session_prompt_wraps_package():
@@ -157,7 +160,7 @@ def test_validate_allows_colon_inside_key_point_topic():
 
 
 def test_session_rules_require_no_colon_after_key_point_topic():
-    assert "严禁用冒号把展开句挂在主题句后面" in SESSION_RULES
+    assert "严禁用冒号把展开句挂在主题句后" in SESSION_RULES
 
 
 def test_validate_rejects_unbolded_question():
@@ -390,3 +393,68 @@ def test_required_headings_are_exported():
         "## 人物简介",
         "## 原文转录",
     )
+
+
+# ---------------------------------------------------------------------------
+# 核心观点「句末引用原话必须自带句末标点」硬闸门（2026-10-10 加）
+# ---------------------------------------------------------------------------
+
+def _md_with_core_points(core_points: str) -> str:
+    """拼一份只关心核心观点区的最小合法稿（其余小节按最低要求填）。"""
+    return (
+        "# T\n\n> 来源：播客 | 标题 | 2026-10-10\n\n"
+        "## Show Notes\n\n简介。\n\n"
+        "## 摘要\n\n一句话概要。\n\n"
+        "## 核心观点\n\n" + core_points + "\n\n"
+        "## 问题与思考\n\n- 问？答。\n\n"
+        "## 人物简介\n\n- **甲**：身份。\n\n"
+        "## 原文转录\n\n【甲】这里是原文转录内容。\n"
+    )
+
+
+def _quote_problems(md_text: str) -> list[str]:
+    return [p for p in validate_session_output(md_text, "x" * 400) if "缺少句末标点" in p]
+
+
+class TestTrailingQuotePeriod:
+    def test_missing_period_is_reported(self):
+        md = _md_with_core_points(
+            "- **观点句。**展开说明，因为流量会真的涌进来。」"
+            "「互联网上的大多数操作都会由 Agent 来完成」".replace("」」", "」")
+        )
+        got = _quote_problems(md)
+        assert len(got) == 1
+        assert "互联网上的大多数操作都会由 Agent 来完成" in got[0]
+
+    def test_period_inside_quotes_passes(self):
+        md = _md_with_core_points(
+            "- **观点句。**展开说明，因为流量会真的涌进来。「互联网上的大多数操作都会由 Agent 来完成。」"
+        )
+        assert _quote_problems(md) == []
+
+    def test_question_mark_passes(self):
+        """疑问句收尾用问号，不要求句号。"""
+        md = _md_with_core_points("- **观点句。**他拒绝了修复请求。「他说要我试着修一下吗？」")
+        assert _quote_problems(md) == []
+
+    def test_embedded_phrase_quotes_are_not_reported(self):
+        """嵌入自己句子里的短语引述不带句号——这是最容易误报的一类，必须守住。"""
+        md = _md_with_core_points(
+            "- **观点句。**工作的基本单位从「职位」变为「任务」，AI 先拿走重复任务。"
+        )
+        assert _quote_problems(md) == []
+
+    def test_mid_sentence_quote_is_not_reported(self):
+        md = _md_with_core_points("- **观点句。**他称之为「另一种探索」的方式仍在演进。")
+        assert _quote_problems(md) == []
+
+    def test_period_outside_quotes_is_reported(self):
+        """句号写在引号外（「……」。）同样不成句剩余类型之一，也在检测范围内。"""
+        md = _md_with_core_points("- **观点句。**展开说明。「这是一句引用的原话」。")
+        assert len(_quote_problems(md)) == 1
+
+    def test_show_notes_section_is_out_of_scope(self):
+        """Show Notes 是节目源简介透传，不按校订规范管。"""
+        body = _md_with_core_points("- **观点句。**正常收尾。「已经带了句号。」")
+        leaked = body.replace("## Show Notes\n\n简介。", "## Show Notes\n\n简介「无标点」")
+        assert _quote_problems(leaked) == []

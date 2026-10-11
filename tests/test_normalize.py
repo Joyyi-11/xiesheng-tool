@@ -1,19 +1,25 @@
 """Tests for deterministic text normalization (project house style).
 
-覆盖三组确定性规则：引号规范化（转录落盘时用）、外文词后半角标点转全角、
-≥3 连重复字合并（后两组为成稿级，2026-09-15 起由 `python -m src.processor.normalize`
+覆盖四组确定性规则：引号规范化（转录落盘时用）、外文词后半角标点转全角、
+≥3 连重复字合并、中文读数日期转阿拉伯数字、核心观点句末引语补句末标点
+（后四组为成稿级，2026-09-15 起由 `python -m src.processor.normalize`
 兜底，源自公开仓 issue #1 / #2）。
 """
 
 from src.processor.normalize import (
+    count_all,
     count_changes,
     count_cn_date,
+    count_quote_period,
     count_text,
     merge_repeat_chars,
     normalize_cn_date,
     normalize_en_punct,
     normalize_markdown,
+    normalize_quote_period,
     normalize_quotes,
+    scan_quote_period,
+    sync_handoff_quotes,
 )
 
 
@@ -191,3 +197,75 @@ class TestNormalizeMarkdown:
     def test_idempotent(self):
         once = normalize_markdown(self.MD)
         assert normalize_markdown(once) == once
+
+
+class TestQuotePeriod:
+    """核心观点：句末引用原话须自带句末标点（句号在引号内，疑问句用问号）。"""
+
+    def test_adds_period_inside_closing_bracket(self):
+        src = "……因为流量会真的涌进来。「互联网上的大多数操作都会由 Agent 来完成」\n"
+        assert normalize_quote_period(src) == (
+            "……因为流量会真的涌进来。「互联网上的大多数操作都会由 Agent 来完成。」\n"
+        )
+
+    def test_question_mark_for_interrogative(self):
+        # 只补句号会把「……要我试着修一下吗」压成陈述句
+        src = "他拒绝了修复的请求。「他说要我试着修一下吗」\n"
+        assert normalize_quote_period(src).endswith("吗？」\n")
+
+    def test_embedded_phrase_is_untouched(self):
+        # 嵌在句中的短语引述本就不带句号，补了就是病句
+        src = "工作的基本单位从「职位」变为「任务」，这才是重点。\n"
+        assert normalize_quote_period(src) == src
+
+    def test_already_punctuated_is_untouched(self):
+        src = "……因为流量会真的涌进来。「……由 Agent 来完成。」\n"
+        assert normalize_quote_period(src) == src
+
+    def test_period_after_bracket_is_left_to_the_validator(self):
+        # 「……」后接句号：位置错了，但已有标点，机械层不动（交给校验器报）
+        src = "……因为流量会真的涌进来。「……由 Agent 来完成」。\n"
+        assert normalize_quote_period(src) == src
+
+    def test_leading_connector_fragment_needs_human(self):
+        # 「而……」是承接残句：补句号仍不是完整句，脚本不自动改
+        src = "……每秒多发一个 prompt。「而不只是每秒多发一个 prompt」\n"
+        assert normalize_quote_period(src) == src
+        fixable, manual = scan_quote_period(src)
+        assert fixable == []
+        assert manual == ["而不只是每秒多发一个 prompt"]
+
+    def test_count_covers_fragments_too(self):
+        # 残句不改，但要报出来给人看，所以计数里算
+        src = "「而是一个残句」\n「这是一个完整句」\n"
+        assert count_quote_period(src) == 2
+
+    def test_idempotent(self):
+        src = "……因为流量会真的涌进来。「……由 Agent 来完成」\n"
+        once = normalize_quote_period(src)
+        assert normalize_quote_period(once) == once
+
+    def test_only_applies_to_key_point_section(self):
+        md = (
+            "## 摘要\n\n关键是「留下来用」\n\n"
+            "## 核心观点\n\n- **观点。**展开。「关键是使用」\n\n"
+            "## 原文转录\n\n【主播】他说「留下来用」\n"
+        )
+        out = normalize_markdown(md)
+        assert "关键是「留下来用」" in out          # 摘要不动
+        assert "他说「留下来用」" in out            # 转录不动
+        assert "- **观点。**展开。「关键是使用。」" in out
+        assert count_all(md)["quote_period"] == 1
+
+    def test_sync_handoff_quote_keeps_anchor(self):
+        doc = {
+            "key_points": [
+                {"quote": "互联网上的大多数操作都会由 Agent 来完成",
+                 "anchor": "互联网上的大多数操作都会由 Agent 来完成"}
+            ]
+        }
+        n = sync_handoff_quotes(doc, ["互联网上的大多数操作都会由 Agent 来完成"])
+        assert n == 1
+        kp = doc["key_points"][0]
+        assert kp["quote"].endswith("完成。")
+        assert kp["anchor"].endswith("完成")  # 锚点须与转录逐字一致，不能动

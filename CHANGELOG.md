@@ -2,6 +2,37 @@
 
 本文件记录 `xiesheng-tool` 公开镜像的关键同步与变更。完整开发历史见私有仓 `lianyi-xiesheng`，公开仓为人工策展子集、非盲拷。
 
+## 2026-10-11 — 句末引语句号规则内化 + rules v25 对齐
+
+来源：私有仓提交 `b1337ca`（规则内化）、`2706189`（成稿应用）。把「核心观点末尾的引用原话必须自带句末标点」从一次性脚本提升为确定性层，并补齐上一轮漏同步的 rules v25。
+
+### 1. 句末引语句号：从 oneoff 脚本到确定性层
+
+此前这条规则只活在 `scripts/oneoff/fix_upper_quote_period.py`（一次性脚本），换集就得记得跑、且规则散落两处易漂移。本次把它**只实现一次**在 `src/processor/normalize.py`：
+
+- 新增 `normalize_quote_period` / `scan_quote_period` / `sync_handoff_quotes`；`normalize_markdown` 对 `## 核心观点` 块自动补句末句号（疑问句补问号，写在引号**之内**），`python -m src.processor.normalize <md> --apply` 顺带同步同名 `_handoff.json` 的 `key_points[].quote`（`anchor` 不动——它是转录回标锚点，必须与转录逐字一致，否则下次重渲染会被覆盖回去）。
+- 判据刻意窄：**只看位于句末（引号后即换行/条目结尾）且自身缺句末标点**的引语，嵌入自己句子的短语引述（工作的基本单位从「职位」变为「任务」）不误伤。
+- 以承接连词（而/但/却/以及…）开头的引语是**残句**（原话本身从半句起），脚本不自动补、只列出来交人工回原文补全整句。
+- `scripts/oneoff/fix_upper_quote_period.py` 降级为**薄封装**：规则只在 normalize 实现一次，脚本只做「一次扫完 `output/` 下全部成稿」的批量能力（`--all`）。
+- `src/processor/session_edit.py`：`validate_session_output` 加硬闸门，成稿若句末「…」缺标点直接报错（Show Notes 透传豁免）。
+
+### 2. rules v25 对齐（上一轮漏同步的线）
+
+私有仓 `rules.py` 已升到 v25（摘要改为底层逻辑提炼而非观点罗列、核心观点/问题与思考/术语表条款重写、术语表明确排除专名）。本轮把 `src/processor/rules.py` 与 `src/processor/session_edit.py` 一并前向移植，使公开仓与私有仓在规则版本上重新对齐（此前公开仓停在 v24，相差约 95 行）。
+
+### 3. 测试
+
+- `tests/test_normalize.py` 追加 `TestTrailingQuotePeriod`（7 例：缺句号告警 / 句号在内通过 / 问号通过 / 嵌入短语不报 / 句中不报 / 句号在外告警 / Show Notes 豁免）与 `TestCnDate`（11 例）。
+- `tests/test_session_edit.py` 追加 `TestTrailingQuotePeriod`（7 例）。
+- `tests/test_rules_single_source.py` 同步 v25 措辞断言（摘要/核心观点/术语表新口径）。
+- 套件 327 → 344 passed。
+
+### 刻意保留的差异
+
+- `scripts/oneoff/build_uncertainty_pack.py`（检索式校订候选包）仍未 ship：它依赖同目录的 `fix_transcript_surface.py` / `scan_typo_candidates.py`，这两个都不在公开仓，文档一旦指向就是断链。等校订工具链整体开源时一并评估。
+- `scripts/oneoff/fix_upper_quote_period.py` 本次**已**随规则内化一并 ship（它现在是只依赖 `src.processor.normalize` 的薄封装，无外部依赖）。
+- 同步时源码统一按 LF 落盘（公开仓 `.gitattributes` 为 `* text=auto`）。
+
 ## 2026-10-10 — 分离前人数预检（probe）+ 中文读数日期规范化
 
 来源：私有仓提交 `b0ddaa8`。两处都是「ASR 出来的结果不好读、不好分」的老问题，本次给出过程内的解法而非事后补丁。
@@ -51,7 +82,7 @@ ASR 的逆文本正则化常把日期落成中文读数（`二零二六年，九
 ### 刻意保留的差异
 
 - `scripts/oneoff/build_uncertainty_pack.py`（检索式校订候选包）未 ship：它依赖同目录的 `fix_transcript_surface.py` / `scan_typo_candidates.py`，这两个都不在公开仓，文档一旦指向就是断链。等校订工具链整体开源时一并评估。
-- 私有仓 `src/processor/rules.py` 已升到 v25，公开仓仍是 v24（相差约 95 行）；本次不同步这条线，保持每次同步只做一件事。
+- 私有仓 `src/processor/rules.py` 当时已升到 v25、公开仓停在 v24（相差约 95 行）；该差异已在次日（2026-10-11）的同步中补齐，见上方条目。
 - 同步时源码统一按 LF 落盘（公开仓 `.gitattributes` 为 `* text=auto`）。
 
 ## 2026-09-16 — 规范化体系对齐（v24 规则 + v23 渲染器）
