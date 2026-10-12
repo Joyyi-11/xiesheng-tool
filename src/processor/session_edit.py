@@ -351,20 +351,24 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
             problems.append("术语表中存在格式不符的条目（每条须为 **术语**：解释）")
         if not all(item.rstrip().endswith(("。", ".")) for item in terms):
             problems.append("术语表每条解释须以句号结尾")
-        # 冗余校验：术语若已在核心观点/问题与思考中展开，应就近内联，不得单列
-        if "## 核心观点" in sections or "## 问题与思考" in sections:
-            _kp_text = sections.get("## 核心观点", "") + "\n" + sections.get("## 问题与思考", "")
-            for item in terms:
-                _m = re.search(r"\*\*(.+?)\*\*[:：]", item)
-                if not _m:
-                    continue
-                _term = _m.group(1).strip()
-                # 长度 >=3 才判冗余，避免「变化」「选择」等两字常用词在正文出现就被误报
-                if _term and len(_term) >= 3 and _term in _kp_text:
-                    problems.append(
-                        f"术语表条目「{_term}」已在核心观点/问题与思考中展开，"
-                        f"应就近内联到对应条目下（缩进子条目），不要再单列术语表"
-                    )
+        # 三态校验（v28）：同一术语只能落一处，判据与确定性修复共用
+        # src.processor.glossary_inline，避免两边口径漂移。
+        from src.processor.glossary_inline import classify_terms, describe_target
+
+        for item, kind, tgt in classify_terms(md_text):
+            _m = re.search(r"\*\*(.+?)\*\*[:：]", item)
+            _term = _m.group(1).strip() if _m else item.strip("- ")[:12]
+            if kind == "dup":
+                problems.append(
+                    f"术语表条目「{_term}」已在核心观点下内联过，术语表又列了一遍（重复），"
+                    f"应删除该条"
+                )
+            elif kind == "inline":
+                where = describe_target(md_text, tgt) if tgt is not None else "对应条目"
+                problems.append(
+                    f"术语表条目「{_term}」出现在{where}的正文中，"
+                    f"应就近内联到该条下（缩进子条目），不要再单列术语表"
+                )
 
     # 人物简介：每人一行正文（**身份**：简介），不用引用
     intro = sections.get("## 人物简介", "")

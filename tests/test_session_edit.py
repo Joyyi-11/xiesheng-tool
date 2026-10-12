@@ -187,10 +187,28 @@ def test_validate_rejects_malformed_terms_glossary():
 
 
 def test_validate_flags_redundant_terms_glossary():
-    # 术语表条目已在核心观点中展开（模型塌缩本身就是一条核心观点），应内联、不得单列
+    # 术语表条目已在核心观点中展开（模型塌缩本身就是一条核心观点），应内联、不得单列。
+    # v28 起闸门区分「已内联→删重复」与「可内联→就近挂」两态，此处属后者：
+    # 术语名出现在核心观点正文里、但还没挂子条目。
     md = _inject_glossary(GOLDEN, "- **模型塌缩**：AI 用生成数据训练导致能力退化的现象。")
     problems = validate_session_output(md)
-    assert any("已在核心观点" in p for p in problems)
+    hits = [p for p in problems if "术语表条目「模型塌缩」" in p]
+    assert hits, f"未报出冗余术语，实际报错：{problems}"
+    assert any("应就近内联" in p and "核心观点第 2 条" in p for p in hits)
+
+
+def test_validate_flags_duplicated_inline_term():
+    # 术语既在观点下内联了一遍、术语表又列一遍 = 重复，闸门应判 dup（要求删除而非内联）
+    md = _inject_glossary(GOLDEN, "- **模型塌缩**：AI 用生成数据训练导致能力退化的现象。")
+    md = md.replace(
+        "- **模型塌缩不可避免。**关键在于对 AI 数据的筛选。",
+        "- **模型塌缩不可避免。**关键在于对 AI 数据的筛选。\n"
+        "  - **模型塌缩。** AI 用生成数据训练导致能力退化的现象。",
+    )
+    problems = validate_session_output(md)
+    hits = [p for p in problems if "术语表条目「模型塌缩」" in p]
+    assert hits, f"未报出重复术语，实际报错：{problems}"
+    assert any("重复" in p and "应删除该条" in p for p in hits)
 
 
 def test_validate_rejects_leftover_speaker_labels():

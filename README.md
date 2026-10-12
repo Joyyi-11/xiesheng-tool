@@ -316,6 +316,7 @@ src/
 │   ├── normalize.py        # 文本归一化（中文读数日期/数量转阿拉伯数字 + 话轮末逗号转句号 + 核心观点句末引语句号 + ASR 标点缺陷清理）
 │   ├── llm_processor.py    # 并行分块校订、模型探测回退、校验、缓存与文稿整理
 │   ├── session_edit.py     # 会话内校订：固定规范提示词 + 结构校验器 + CLI
+│   ├── glossary_inline.py  # 术语表三态判据（重复→删 / 可内联→挂到首次出现的观点 / 无关联→留）与确定性修复
 │   ├── rebuild_transcript.py  # 会话包保真重建原文转录（防过度删减）
 │   └── finish_phase_b.py   # Phase B 幂等续跑：扫描/生成缺失初稿/补来源行/校验报告/说话人画像
 └── renderer/markdown.py    # Markdown 渲染
