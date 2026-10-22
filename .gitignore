@@ -51,3 +51,12 @@ benchmark/**/data/**/b_run.log
 # vol74 选型对比：运行日志与 PoC 脚本含本地绝对路径与播客期号，不提交（本地文件保留）
 benchmark/vol74-asr-comparison/logs/
 benchmark/vol74-asr-comparison/scripts/_run_asr.py
+
+# 转录/校订中间产物：ASR 生成的 handoff / segments 快照与预编辑备份
+# 此前仅覆盖 .bak* 变体，漏掉 _handoff.json / _segments.json / .pre_* / .bak_k*，
+# 导致每次转录后这些大体积中间件反复出现在 git status。按「结构化文稿入库、其余不入库」原则补齐。
+output/**/*_handoff.json
+output/**/*_segments.json
+output/**/*.pre_fix
+output/**/*.pre_song
+output/**/*.bak_k*

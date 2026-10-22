@@ -31,6 +31,7 @@ from src.utils import (
     TRANSCRIPT_HEADING,
     TRANSCRIPT_HEADING_RE,
     get_transcript_body,
+    transcript_retention,
 )
 
 logger = logging.getLogger(__name__)
@@ -555,24 +556,15 @@ def validate_session_output(md_text: str, source_text: str = "") -> list[str]:
             problems.append(
                 f"核心观点有 {len(_bad_quotes)} 处位于句末的引用原话缺少句末标点（例：{_sample}）。"
                 "收尾的引用是完整句子，句号须写在引号之内（「……。」，疑问句用「……？」）；"
-                "完整句可确定性修复：`D:/Python311/python.exe -m src.processor.normalize <md> --apply`"
+                "完整句可确定性修复：`python -m src.processor.normalize <md> --apply`"
                 "（会同步 _handoff.json 的 quote）；承接连词开头的残句需回原文补全整句。"
             )
 
     if source_text and transcript:
-        # 比率只比「正文内容」，先把说话人标签（[SPEAKER_XX] / 【姓名】）与空白剥掉，
-        # 否则 diarized 源里 1229 个冗长 [SPEAKER_XX] 标签会把分母虚高近一倍，造成假阳性。
-        _strip = lambda s: re.sub(r"【[^】]*】|\[SPEAKER_\d+\]|\s", "", s)
-        # 部分会话包头部嵌入了 Show Notes / 简介等非语音 markdown 文本（如「專家型通才」
-        # 集 4977 字符头部），首个 [SPEAKER_XX] 标签之后才是语音转录。分母若含头部，
-        # 会把保留率虚低（实测 30% vs 真实 103%），此处从首个语音标签起算。
-        _src = source_text
-        _first_spk = re.search(r"\[SPEAKER_\d+\]", _src)
-        if _first_spk:
-            _src = _src[_first_spk.start():]
-        _src_body = _strip(_src)
-        _tr_body = _strip(transcript)
-        ratio = len(_tr_body) / max(len(_src_body), 1)
+        # 保留率口径统一在 src.utils.transcript_retention：分母只算会话包的语音正文
+        # （首个 [SPEAKER_XX] 起），并两侧剥掉说话人标签与空白。此前分母含 Show Notes
+        # 头部、且不剥标签，会把保留率算成 30%（真实 103%）。
+        ratio = transcript_retention(transcript, source_text)
         if ratio < 0.5:
             problems.append(
                 f"原文转录长度仅为原始转录的 {ratio:.0%}（疑似过度删减）。"

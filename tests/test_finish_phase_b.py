@@ -120,3 +120,37 @@ class TestAnalyzeOne:
         r = analyze_one(diarized, md, fix_source=True)
         assert r.get("source_fixed") is True
         assert "播客  |  标题  |  2026-01-01" in md.read_text(encoding="utf-8")
+
+    def test_ratio_excludes_show_notes_and_labels(self, tmp_path):
+        """占比只比语音正文：Show Notes 与说话人标签都不进分母。
+
+        回归：旧实现按 `# 转录全文\\n` 切分母，但会话包标题带「（带说话人标签）」
+        后缀，正则从未命中 → 分母一直是整包，报告 47% 而真实 95%+。
+        """
+        package = (
+            "# 标题\n\n> 来源：播客 | 标题 | 2026-08-01\n\n# Show Notes\n\n"
+            + "节目介绍。" * 200
+            + "\n\n# 转录全文（带说话人标签）\n\n"
+            "[SPEAKER_00] 大家好。\n[SPEAKER_01] 今天聊 AI。\n"
+        )
+        diarized = tmp_path / "节目_diarized.txt"
+        diarized.write_text(package, encoding="utf-8")
+        md = md_path_for(diarized)
+        md.write_text(
+            "# 标题\n\n## 原文转录\n\n【甲】大家好。\n\n【乙】今天聊 AI。\n",
+            encoding="utf-8",
+        )
+        r = analyze_one(diarized, md, fix_source=False)
+        assert r["ratio"] >= 0.95
+
+    def test_ratio_still_flags_real_over_compression(self, tmp_path):
+        """口径放宽不能把闸门放哑：真删减仍应报低保留率。"""
+        long_package = SAMPLE_PACKAGE.replace(
+            "[SPEAKER_00] 我们开始吧。", "[SPEAKER_00] 我们开始吧。" + "正文内容。" * 100
+        )
+        diarized = tmp_path / "节目_diarized.txt"
+        diarized.write_text(long_package, encoding="utf-8")
+        md = md_path_for(diarized)
+        md.write_text("# 标题\n\n## 原文转录\n\n【甲】大家好。\n", encoding="utf-8")
+        r = analyze_one(diarized, md, fix_source=False)
+        assert r["ratio"] < 0.5

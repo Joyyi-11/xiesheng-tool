@@ -310,11 +310,15 @@ src/
 ├── diarization/            # 说话人识别
 │   ├── probe.py                    # 分离前人数预检：多 K 轮廓系数扫描定后端与人数
 │   ├── speaker_diarization.py      # cam++ / wespeaker 两后端
+│   ├── speaker_resolver.py         # 簇 → 【身份姓名】映射、花名册解析、合并矛盾检测
+│   ├── show_notes_speakers.py      # 从 Show Notes 解析花名册人数
 │   └── collapse_check.py           # 分离后塌缩检测（probe 未覆盖时的兜底）
 ├── processor/
-│   ├── prompt.py           # 忠实校订与提要生成提示词
-│   ├── normalize.py        # 文本归一化（中文读数日期/数量转阿拉伯数字 + 话轮末逗号转句号 + 核心观点句末引语句号 + ASR 标点缺陷清理）
+│   ├── rules.py            # 编辑口径单一权威源（EDIT_*/STRUCT_* + RULES_SPEC_VERSION）
+│   ├── prompt.py           # 忠实校订与提要生成提示词（引用 rules 常量组装）
+│   ├── normalize.py        # 成稿级确定性规范化（标点/引语/数量/重复字），CLI 可干跑
 │   ├── llm_processor.py    # 并行分块校订、模型探测回退、校验、缓存与文稿整理
+│   ├── output_quality.py   # api 链路成品闸门（必填项与残留说话人标签）
 │   ├── session_edit.py     # 会话内校订：固定规范提示词 + 结构校验器 + CLI
 │   ├── glossary_inline.py  # 术语表三态判据（重复→删 / 可内联→挂到首次出现的观点 / 无关联→留）与确定性修复
 │   ├── rebuild_transcript.py  # 会话包保真重建原文转录（防过度删减）

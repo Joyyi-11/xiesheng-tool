@@ -93,6 +93,33 @@ def get_transcript_body(sections: dict[str, str]) -> str:
     return ""
 
 
+# --- 保留率（成稿转录区 ÷ 会话包语音正文）的唯一口径 ---
+# 分母若含标题 / Show Notes / 说话人标签，保留率会虚低近一半（实测报告 47%、
+# 真实 100%）。校验器与 Phase B 报告都必须走这里，不要在各自模块里另算一份。
+_SPEAKER_OR_SPACE_RE = re.compile(r"【[^】]*】|\[SPEAKER_\d+\]|\s")
+
+
+def strip_speaker_labels(text: str) -> str:
+    """剥掉【姓名】/ [SPEAKER_XX] 标签与空白，只留语音正文（用于比长度）。"""
+    return _SPEAKER_OR_SPACE_RE.sub("", text)
+
+
+def package_transcript_body(package_text: str) -> str:
+    """取会话包里的语音转录部分：首个 [SPEAKER_XX] 起，丢掉标题与 Show Notes。
+
+    部分会话包在首个标签前嵌了 Show Notes / 简介等非语音文本，分母若含这些
+    头部，保留率会被算成 30%（真实 103%）。
+    """
+    m = SPEAKER_LABEL_RE.search(package_text)
+    return package_text[m.start():] if m else package_text
+
+
+def transcript_retention(transcript: str, package_text: str) -> float:
+    """成稿转录区相对会话包的保留率（1.0 = 未删减）。"""
+    denominator = len(strip_speaker_labels(package_transcript_body(package_text)))
+    return len(strip_speaker_labels(transcript)) / max(denominator, 1)
+
+
 # --- 原文转录：合并同一说话人的相邻段落（确定性操作，脚本化而非交给 LLM）---
 # 成因：源转录按语音停顿切碎（同一人连续多段），且 diarization 常把同一人判成
 # 多个簇（如 SPEAKER_01/SPEAKER_03 都映射到同一姓名），映射后即为同名相邻段。

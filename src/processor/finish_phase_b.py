@@ -51,6 +51,8 @@ from src.utils import (
     SPEAKER_LINE_RE,
     TRANSCRIPT_HEADING,
     get_transcript_body,
+    package_transcript_body,
+    transcript_retention,
 )
 
 PLACEHOLDER_SECTIONS = {
@@ -118,8 +120,10 @@ def build_draft(diarized: Path, speaker_map: dict[str, str]) -> str:
 
 def analyze_one(diarized: Path, md_path: Path, fix_source: bool) -> dict:
     src = diarized.read_text(encoding="utf-8")
-    m = re.search(r"# 转录全文\n(.*)", src, re.S)
-    src_text = m.group(1) if m else src
+    # 分母只取语音正文（首个 [SPEAKER_XX] 起）：标题与 Show Notes 不是转录，算进
+    # 分母会让保留率虚低近一半。旧实现按 `# 转录全文\n` 切，但会话包标题带后缀
+    # 「（带说话人标签）」，该正则从未命中、分母一直是整包（实测报告 47%、真实 95%+）。
+    src_text = package_transcript_body(src)
 
     result = {
         "diarized": diarized.name,
@@ -146,7 +150,7 @@ def analyze_one(diarized: Path, md_path: Path, fix_source: bool) -> dict:
     result["probs"] = validate_session_output(md, src_text)
     # 精确取转录段统计残留标签（避免把「## 校订说明」等后续章节的引用算进去）
     trans_section = get_transcript_body(_split_sections(md))
-    result["ratio"] = len(trans_section) / max(len(src_text), 1) if src_text else 0
+    result["ratio"] = transcript_retention(trans_section, src) if src else 0.0
     result["labels"] = len(SPEAKER_LABEL_RE.findall(trans_section))
     for heading in PLACEHOLDER_SECTIONS:
         if PLACEHOLDER_MARK in (md.split(heading, 1)[1].split("\n## ", 1)[0] if heading in md else ""):
