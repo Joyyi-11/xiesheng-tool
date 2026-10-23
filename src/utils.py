@@ -52,6 +52,24 @@ def safe_filename(value: str, max_length: int = 80) -> str:
     return cleaned[:max_length] or "podcast"
 
 
+def episode_stem(podcast_name: str, title: str) -> str:
+    """产物统一命名：<节目来源>-<本期节目名称>（连漪 2026-10-14 定）。
+
+    例：``十字路口Crossing-AI产品经理指南：我是谁，从哪来，到哪去｜对谈字节AI产品负责人Vanessa，…``
+
+    规则：前缀不占标题的字符配额——标题再长也只截标题、不截来源；
+    来源缺失时退回纯标题。全角标点（：｜，）不在 Windows 非法字符集内，原样保留。
+    """
+    source = (podcast_name or "").strip()
+    body = (title or "").strip()
+    parts = [
+        safe_filename(value, max_length=limit)
+        for value, limit in ((source, 40), (body, 100))
+        if value
+    ]
+    return safe_filename("-".join(parts), max_length=160)
+
+
 class Timer:
     """Simple timer context manager."""
     def __init__(self):

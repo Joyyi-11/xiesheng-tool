@@ -31,7 +31,7 @@ from src.processor.output_quality import assert_valid_output_doc
 from src.renderer.markdown import build_output_markdown
 from src.result_cache import find_cached_handoff, find_cached_markdown, record_handoff, record_result
 from src.scraper.xiaoyuzhou import scrape_episode
-from src.utils import CostTracker, Timer, fmt_time, safe_filename
+from src.utils import CostTracker, Timer, episode_stem, fmt_time, safe_filename
 
 logging.basicConfig(
     level=logging.INFO,
@@ -217,7 +217,9 @@ def process_episode(url, args, output_dir, tracker, transcriber, audio_override,
                     return True
 
         # --- Step 2: Download audio (or reuse existing WAV) ---
-        safe_name = safe_filename(episode.title)
+        # 产物命名：<节目来源>-<本期节目名称>，例
+        # 「十字路口Crossing-AI产品经理指南：我是谁，从哪来，到哪去｜对谈字节AI产品负责人Vanessa，…」
+        safe_name = episode_stem(episode.podcast_name, episode.title)
         with Timer() as t:
             if audio_override is not None:
                 if not audio_override.exists():

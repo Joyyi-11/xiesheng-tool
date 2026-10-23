@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 MAX_KEY_POINTS = 20
 MAX_QUOTES = 20
-MAX_KEYWORDS_SAFETY_CAP = 10  # 防失控上限，非产品规范（v12 术语表规范 0-4 个）
+MAX_KEYWORDS_SAFETY_CAP = 10  # 防失控上限，非产品规范（v23 术语表为可选小节，无残留硬术语则不输出）
 MAX_QUESTIONS = 5
 
 

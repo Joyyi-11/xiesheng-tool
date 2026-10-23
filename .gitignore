@@ -1,9 +1,13 @@
 # .env 含密钥，不提交
 .env
 
-# 输出目录
-output/*.md
+# 输出目录：结构化文稿（*.md）入库，其余中间产物不入库
 output/*.md.bak
+output/*.md.bak2
+output/*_handoff.json.bak
+output/*_clean_tmp.md
+output/*_final.md
+output/rerun-174-20260808/
 output/*.txt
 output/podcast_audio.*
 output/.work/
@@ -52,7 +56,26 @@ benchmark/**/data/**/b_run.log
 benchmark/vol74-asr-comparison/logs/
 benchmark/vol74-asr-comparison/scripts/_run_asr.py
 
-# 转录/校订中间产物：ASR 生成的 handoff / segments 快照与预编辑备份
+# 校订流程产生的备份 / 预览 / 临时稿（2026-09-10 补充）
+# 背景：旧规则只覆盖 .bak / .bak2 精确后缀，漏掉带前缀的变体，导致
+# .bak_pre_2409fix / tmp_118_* / _diarized.txt.bak / _handoff.json.bak2 等
+# 反复污染 git status，每次提交都要手工筛除。此处补齐变体与临时稿。
+output/**/*.bak_pre_*
+output/**/*.bak2
+output/**/*.md.bak*
+output/**/*_diarized.txt.bak
+output/**/*_handoff.json.bak*
+output/**/tmp_*.md
+scripts/oneoff/main_b64.txt
+tmp_trad_test.txt
+benchmark/phase1-*/
+
+# 校订输入包备份与临时分析件（2026-09-11 补充）：proofread 前的 handoff 快照
+# 后缀为 .pre_proof，与 .bak* 同族；tmp_*.json 为一次性扫描结果，均不入库。
+output/**/*_handoff.json.pre_*
+tmp_*.json
+
+# 转录/校订中间产物（2026-10-21 补充）：ASR 生成的 handoff / segments 快照与预编辑备份
 # 此前仅覆盖 .bak* 变体，漏掉 _handoff.json / _segments.json / .pre_* / .bak_k*，
 # 导致每次转录后这些大体积中间件反复出现在 git status。按「结构化文稿入库、其余不入库」原则补齐。
 output/**/*_handoff.json

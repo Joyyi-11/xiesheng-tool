@@ -13,13 +13,12 @@
 ## 功能
 
 - 爬取小宇宙播客节目信息、Show Notes
-- 下载音频并转写为文字（本地 FunASR SenseVoice-Small，免费；整段音频串行转录，本机实测约 6–9x 实时、RTF 0.11–0.17，1 小时音频约 7–10 分钟转写；仅裸模型转写，不含 LLM 校订，+LLM 校订另需按块耗时，端到端约十几到二十余分钟）
+- 下载音频并转写为文字（本地 FunASR SenseVoice-Small，免费；整段音频串行转录，本机实测约 6–9x 实时、RTF 0.11–0.17，1 小时音频约 7–10 分钟转写；仅裸模型转写，不含 LLM 校订，+LLM 校订另需按块耗时，端到端 10-20 分钟）
 
 > **RTF（Real Time Factor，实时率）**：衡量转写速度的指标，RTF 越小速度越快。公式为 `RTF = 处理音频所需时间 ÷ 音频原始时长`。例如一段 1 小时（60 分钟）的音频，若转写花了 6 分钟，则 `RTF = 6 ÷ 60 = 0.1`。
 - 千问或 DeepSeek 分块校订：错字修正、口语清理、语义分段、专名纠错（分块并行校订）
 - LLM 模型自动回退：按 `--llm-model` 候选列表（逗号分隔）或网关 `/models` 自动选可用模型，404 `model_not_found` 不再白白重试，过载（429/502/503）指数退避
 - 会话内校订固化：`python -m src.processor.session_edit <episode>_diarized.txt` 输出固定规范提示词，附带结构校验器保证输出格式稳定
-- 说话人人数预检（`probe`）：分离前跑 VAD + speaker embedding 多 K 轮廓系数扫描，按声学可分性决定后端与人数——避免 cam++ 把双人访谈塌缩成一簇；需要 `pip install '.[diarize]'`，不可用时自动回退 cam++ 并由塌缩检测兜底
 - 独立生成摘要、核心观点、问题与思考、术语表等阅读辅助信息，避免长文输出截断
 - 永久保留原始转录，整段音频缓存支持失败后续跑
 - 按模型、来源 hash 和提示词版本隔离缓存，避免失败重跑或改提示词后重复消耗 LLM token
@@ -27,7 +26,7 @@
 - 结果缓存：同链接 + 同日期的重复运行直接复用已完成文稿，`--refresh` 强制重跑
 - 支持两种后处理方式：API 链路（`--llm-mode api`）走自动化校订，会话链路（`--llm-mode session`）在会话内处理
 - 记录转写耗时、实时系数和 LLM token 用量
-- 输出结构化 Markdown：Show Notes → 摘要 → 核心观点 → 问题与思考 → 术语表 → 人物简介 → 原文转录
+- 输出结构化 Markdown：Show Notes → 摘要 → 核心观点 →（术语表，可选）→ 问题与思考 → 人物简介 → 原文转录
 
 ## 完整链路
 
@@ -38,13 +37,13 @@
 
 ① 抓取元信息与音频：抓取标题／来源／Show Notes／音频地址，并下载音频
 ② 本地转写：FunASR SenseVoice-Small 本地转写，保留原始逐字稿
-③ 说话人区分：分离前先做人数预检（多 K 轮廓系数扫描）决定后端与人数，再为不同声音添加标签
+③ 说话人区分：为不同声音添加标签
 ④ LLM 分块校订：分块修正错字、口语、专名、分段（会话内链路产出输入包，API 链路自动校订，含重试／回退）
 ⑤ 内容提炼：生成摘要、核心观点、问题与思考、术语表等阅读辅助信息
 ⑥ Markdown 组装：按固定结构写入
 
 输出：结构化 Markdown 文稿（固定结构）
-Show Notes → 摘要 → 核心观点 → 问题与思考 → 术语表 → 人物简介 → 原文转录
+Show Notes → 摘要 → 核心观点 →（术语表，可选）→ 问题与思考 → 人物简介 → 原文转录
 ```
 
 ## 两种后处理链路
@@ -78,18 +77,18 @@ python -m src.processor.rebuild_transcript output/<节目>_diarized.txt -o outpu
 
 两阶段、两条命令 + 两件人工事。核心原则：**可自动的全部脚本化，不可自动的由幂等脚本列出待办**——任何中断重跑同一条命令即收敛，不依赖「AI 会话跨轮次续跑」。
 
-**节奏规则**：Phase A 全量转录后台自动跑完（零值守，期间机器勿跑重程序）→ Phase B 逐批校订（每轮 3–5 集）。**不要「转一集校一集」**——转录 6–52 分钟/集节奏不均，会让人碎片化干等；且同主题批量集集中校订可横向统一术语与人物称谓（素材合集尤其重要）。diarized 是静态文件，校订质量不随时间衰减。
+**节奏规则（2026-09-07 连漪拍板）**：Phase A 全量转录后台自动跑完（零值守，期间机器勿跑重程序）→ Phase B 逐批校订（每轮 3–5 集）。**不要「转一集校一集」**——转录 6–52 分钟/集节奏不均，会让人碎片化干等；且同主题批量集集中校订可横向统一术语与人物称谓（素材合集尤其重要）。diarized 是静态文件，校订质量不随时间衰减。
 
 ### Phase A：批量转录（逐集独立进程，禁止单进程跨集）
 
-逐集独立进程循环（Git Bash）；每集一个独立进程，退出即还内存，缓存幂等可续跑：
+**推荐直接用脚本**（规则已内嵌：逐集独立进程 + 集间内存检查 + 幂等续跑，无需记规则）：
 
 ```bash
-for url in "<url1>" "<url2>" "<url3>"; do
-    python -m src.main --llm-mode session "$url"
-    sleep 20   # 集间等待内存回收
-done
+bash scripts/batch_transcribe.sh <url1> <url2> ...        # 直接给链接
+bash scripts/batch_transcribe.sh -f urls.txt              # 每行一个链接（可续跑失败集）
 ```
+
+等价的逐集独立进程循环（Git Bash）如下，手工跑亦可：
 
 ⚠️ **勿用 `python -m src.main <url1> <url2> ... --jobs 1` 单进程跨集串行**：`_release_asr()`（每集转写完成释放主模型）引入后，第 2 集起由主进程二次加载 FunASR 全套模型必段错误（exit 139、无 traceback）。`--jobs 1` 只可用于单集；`--jobs 2` 走 worker 子进程加载可跨集（历史 10 期批量实证），但逐集独立进程最稳、内存最省。
 
@@ -108,7 +107,79 @@ python -m src.processor.finish_phase_b --speaker-preview
    python -m src.processor.rebuild_transcript <包> \
        --speaker-map "SPEAKER_00:主播xx,SPEAKER_01:嘉宾yy" -o <md> --replace-transcript
    ```
-2. **上层章节**：摘要/核心观点/问题与思考/术语表/人物简介需人工撰写（生成初稿中为「待校订」占位，脚本据此列出待办清单）。**每轮 3–5 集分批撰写**，同一主题批次集中处理、术语与人物称谓横向统一。
+2. **上层章节**：摘要/核心观点/问题与思考/人物简介需人工撰写（**术语表可选**，仅在确有无法就近挂到核心观点下的硬术语时才填；生成初稿中为「待校订」占位，脚本据此列出待办清单）。**每轮 3–5 集分批撰写**，同一主题批次集中处理、术语与人物称谓横向统一。
+
+### 单集校订流程（SOP · 2026-09-08 沉淀）
+
+> 校订范围的界定、以及「脚本静默失败」类硬约束，权威源在 `AGENTS.md`（§批次范围、§校订 Gotcha）。
+> 本章是给人看的操作步骤；改规则先改 AGENTS.md。
+
+**第 -1 步 · 确认本批范围**（`output/` 是混装目录，勿按文件日期猜）：
+```bash
+python scripts/oneoff/batch_manifest.py --status    # 出本批待办清单与每集状态
+```
+
+每集走完下面 6 步即落盘一份合规成稿；脚本均幂等，中断重跑同一条命令即收敛。`<prefix>` = 成稿文件名去扩展名（脚本按 `output/<prefix>*` 模糊匹配 handoff 与会话包）。
+
+**第 0 步 · 说话人画像**：先确认要映射几个说话人、各自身份线索。
+```bash
+python -m src.processor.finish_phase_b --speaker-preview   # 全部集；或按需直接看 output/<prefix>_diarized.txt 前几段
+```
+
+**第 1 步 · 保守连读（治 ASR 逐停顿补句号）**：
+```bash
+python scripts/oneoff/merge_short_sentences.py "<prefix>"             # 干跑
+python scripts/oneoff/merge_short_sentences.py "<prefix>" --apply      # 落盘（自动 .bak）
+```
+规则：只在同一说话人相邻行之间、前句 ≤12 字、且不以 ？/！ 结尾时才把句号改逗号。连读后 anchor 可能失配，第 5 步回标时留意。
+
+**第 2 步 · 说话人映射 + 重建原文转录**：
+```bash
+python -m src.processor.rebuild_transcript "output/<prefix>_diarized.txt" \
+    --speaker-map "SPEAKER_00:主播xx,SPEAKER_01:嘉宾yy" \
+    -o "output/<prefix>.md" --replace-transcript
+```
+身份判定靠「自述 / 指称 / 发言时间线」；无法可靠拆分的混段保留 `[SPEAKER_XX]` 由人工复核（校验器放行，但报告列出）。
+两点硬约束：
+- **`-o` 必填**：只给 `--replace-transcript` 而不给 `-o` 时脚本只打印不落盘，成稿仍是 `[SPEAKER_XX]`（会被 finish_phase_b 判为残留标签）。
+- 多人节目里可用**「主播点名 → 下一段归属」**启发式锁定：主播喊「芊芊/曲哥」后紧跟的那一段，即对应嘉宾。ASR 常把人名听成多种写法（芊芊→天天/青天/尖尖/婷天/青青），需全部归一并写进按期错字表。
+- 第 2 步必须在第 3 步之前：先重建（带姓名标签）再跑错字订正，否则订正作用于未重建的稿子。
+
+**第 3 步 · 表面层错字 / 专名订正**：
+按期错字表放 `output/.work/<prefix>_typos.json`（`{"错字短语": "订正短语", ...}`，只写带上下文的短语避免误伤同形正确用法），通用表内置 AI / 英文专名归一（如 `a i`→`AI`、`叉 g p t`→`ChatGPT`）：
+```bash
+python scripts/oneoff/fix_transcript_surface.py "<prefix>"                        # 干跑
+python scripts/oneoff/fix_transcript_surface.py "<prefix>" --apply --also-handoff  # 落盘并回写 handoff
+```
+
+**第 4 步 · 填上层章节字段**：把摘要 / 核心观点 / 问题与思考 / 术语表 / 人物简介写入 `output/.work/<prefix>_review.json`（键：`speaker_mapping, speaker_intro, summary, key_points, questions, keywords`），再打进 handoff：
+```bash
+python -c "import json,glob; h=glob.glob('output/<prefix>*_handoff.json')[0]; r=json.load(open('output/.work/<prefix>_review.json',encoding='utf-8')); d=json.load(open(h,encoding='utf-8')); d.update({k:r[k] for k in ('speaker_mapping','speaker_intro','summary','key_points','questions','keywords')}); json.dump(d,open(h,'w',encoding='utf-8'),ensure_ascii=False,indent=2)"
+```
+- 核心观点三段式：观点句（句号结尾）+ 展开句 + 引用句，**三段之间不留空格**；**观点句后禁用冒号引出展开**；引用原话只在该观点确有值得单收的金句时才附，须逐字摘录原文、不单独成行或用引用块。
+- 问题与思考：问题整句加粗、序号留在加粗外（写成 `1. **问题？**`），答案换行另写、不加粗。
+- 术语表（可选）：仅在确有无法就近挂到核心观点下的硬术语时才填 `keywords`，无则留空数组、整节不输出；每条解释以句号结尾；排除播客名 / 节目名 / 嘉宾名 / 平台名。
+
+**第 5 步 · 回标加粗 + 重渲染上层**：
+```bash
+python scripts/oneoff/backfill_anchors.py "<prefix>" --apply                  # 从原文找回 anchor 写回 handoff
+python scripts/oneoff/render_upper_from_handoff.py "<prefix>"                  # 干跑
+python scripts/oneoff/render_upper_from_handoff.py "<prefix>" --apply          # 落盘（自动 .bak）
+```
+`render_upper_from_handoff.py` 只重渲染上层六段（格式由 renderer 保证），**沿用成稿已重建的原文转录**，避开整稿重渲染把转录打回 `[SPEAKER_XX]` 且不分段的老陷阱。
+
+成稿若由会话链路直接产出 Markdown（没有 handoff 可回标），用确定性回标脚本从上层已有的引用原话与术语在转录区补加粗（校验器要求转录区至少有一处回标）：
+```bash
+python -m src.processor.bold_anchors "output/<prefix>.md"          # 干跑，看命中
+python -m src.processor.bold_anchors "output/<prefix>.md" --apply  # 落盘（自动 .bak）
+```
+
+**第 6 步 · 校验**：
+```bash
+python -m src.processor.finish_phase_b   # 看本报告，目标该集 ✅ OK
+```
+
+**旧稿格式救回（⚠️ 批次）**：上一轮用旧格式生成的稿子（缺术语表小节、①②③ 编号、说话人用 **加粗** 而非【】、含大纲 / mermaid / 代码围栏），若 handoff 字段已填好，直接第 5 步重渲染即可修正上层结构；说话人标签若仍是 **加粗** 样式需先改成【】再渲染。
 
 **经验要点**：
 
@@ -123,8 +194,6 @@ python -m src.processor.finish_phase_b --speaker-preview
 ## 模型选型
 
 转写后端默认 **FunASR SenseVoice-Small**（CPU 本机实测约 6–9x 实时、RTF 0.11–0.17，随硬件、内存与 CPU 占用浮动；长音频精度与 Paraformer 相当、原生多语种、+LLM 后处理即可补足英文专名大小写）。Paraformer-Large 作为可选 `--model paraformer-large`，适合需要**热词定制**（常驻嘉宾名/产品名）或最稳**字级时间戳**的场景。原 faster-whisper 路线已移除——它的提速完全依赖 ffmpeg 切片 + 多进程并行，该机制退役后 Whisper 只剩 ~1x 串行的裸速度，留作兜底只会慢到超时/失败。
-
-三模型同期的实跑对比实验与最终选型决策记录在 [`benchmark/vol74-asr-comparison/`](benchmark/vol74-asr-comparison/README.md)。
 
 ## 模型缓存
 
@@ -214,9 +283,9 @@ LLM_BASE_URL=https://your-provider/v1
 | `--speakers` | 自动检测 | 明确指定说话人数 |
 | `--llm-mode {api,session}` | 否 | LLM 执行方式：`api`=调 API Key 自动化校订，`session`=会话内由 agent 校订（按会话积分计费，同样要付费）；默认自动检测：有 Key→api，无→session；`--no-llm` 为弃用别名，等价于 `session` |
 | `--no-diarization` | 否 | 跳过说话人识别 |
-| `--diarization {campplus,wespeaker,auto}` | `auto` | 说话人分离后端：`campplus`=SenseVoice 自带 cam++（零额外成本）；`wespeaker`=外部 diarize 全局 embedding，圆桌/塌缩更稳但需显式给人数（配合 `--speakers`）；`auto`=**默认**，分离前先跑人数预检 `probe`（VAD + speaker embedding + 多 K 轮廓系数扫描），按声学可分性决定后端与人数，预检不可用时保守回退 cam++ |
-| `--diarization campplus --no-probe` | 否 | 跳过人数预检，退回按 Show Notes 人数判据选后端 |
-| `--probe-sample-ratio` | `0.25` | 预检时的 VAD 段抽样比例：越低越快，长音频（>2h）可调到 `0.1`–`0.15` |
+| `--diarization {campplus,wespeaker,auto}` | `auto` | 说话人分离后端：`campplus`=SenseVoice 自带 cam++（零额外成本，2-3 人清晰对谈最优）；`wespeaker`=外部 diarize 全局 embedding，圆桌/塌缩更稳但单集 +7~11 分钟；`auto`=先跑人数预检 probe，按声学可分性自动选后端与人数（≥3 人或圆桌倾向 wespeaker） |
+| `--no-probe` | 否 | 跳过前置的人数预检，退回按 Show Notes 人数判据选后端（预检耗时，长音频可跳过） |
+| `--probe-sample-ratio` | `0.25` | 预检时的 VAD 段抽样比例；越低越快，长音频可调到 `0.1` |
 | `--refresh-diarization` | 否 | 仅重跑说话人分离，复用已持久化的转录结果、不重跑 ASR（替代旧的 `--refresh --diarization wespeaker` 全量重转录；原 cam++ 稿自动 `.bak` 备份） |
 | `--spk-max-seg-ms` | `4000` | 说话人分离粒度：VAD 段上限（毫秒），段越短越不易把两人快速接话并成一段；可回退 `8000` |
 | `--batch-size-s` | `60` | FunASR VAD 批切段时长（秒）：越大单次送入越长、调用次数越少但峰值内存越高；内存紧张默认保守，可在 90/120 间 A/B 验证后上调 |
@@ -241,23 +310,24 @@ LLM_BASE_URL=https://your-provider/v1
 
 ## 核心观点
 - **观点句。**展开论述句（1-2 句）「值得单独收录的原话」
-  - **观点内特有术语**：1-2 句就近解释（如「第一性原理」「第二曲线」这类概念，解释直接挂在该观点下）
-（不限条数，提炼全部重要观点；观点句、展开句、引用句三段顺次相接、彼此不留空格，不用冒号；引用原话只在该观点确有值得单收的金句时才附，须逐字摘录原文、不单独成行；句末的引用原话须自带句末标点——句号写在引号之内（疑问句用问号），嵌在句中的短语引述（如从「职位」变为「任务」）不标标点）
+  - **观点内特有术语**，1-2 句就近解释（如「第一性原理」「第二曲线」这类概念，解释直接挂在该观点下）
+（不限条数，提炼全部重要观点；观点句、展开句、引用句三段顺次相接、彼此不留空格，不用冒号；引用原话只在该观点确有值得单收的金句时才附，须逐字摘录原文、不单独成行）
 
-## 术语表（可选，绝大多数情况不写）
+## 术语表（可选）
 - **残留术语**：1-2 句说明
-（已能在对应核心观点/问题与思考中就近挂住的概念，必须直接作为该观点下的缩进子条目内联解释，绝不许再单列成术语表；只有跟所有核心观点完全无关、无法就近跟随的硬术语才单独拎出来，无则整节不出现；排除播客名/节目名/嘉宾名/平台名等专名）
+（只在确有无法就近挂到任一核心观点下的硬术语时才输出，无则整节不出现；排除播客名/节目名/嘉宾名/平台名等专名）
 
 ## 问题与思考
-- **① 核心问题（整理式，非原文照抄）？** 思考或回答（1-3 句）
-（3-5 个核心追问，与核心观点互补不重复）
+1. **核心问题（整理式，非原文照抄）？**
+   思考或回答（1-3 句）
+（3-5 个核心追问，与核心观点互补不重复；问题整句加粗、序号留在加粗外，答案换行另写、不加粗）
 
 ## 人物简介
 **身份姓名**：简介
 （正文格式）
 
 ## 原文转录
-（校订后的分角色完整文稿）
+（校订后的分角色完整文稿；核心观点的引用原话与术语在首次出现处加粗回标）
 ```
 
 ## 成本
@@ -308,11 +378,10 @@ src/
 │   ├── base.py                     # 转写器抽象接口
 │   └── funasr_transcriber.py       # FunASR 本地转写（SenseVoice / Paraformer，整段串行 + 缓存）
 ├── diarization/            # 说话人识别
-│   ├── probe.py                    # 分离前人数预检：多 K 轮廓系数扫描定后端与人数
-│   ├── speaker_diarization.py      # cam++ / wespeaker 两后端
-│   ├── speaker_resolver.py         # 簇 → 【身份姓名】映射、花名册解析、合并矛盾检测
-│   ├── show_notes_speakers.py      # 从 Show Notes 解析花名册人数
-│   └── collapse_check.py           # 分离后塌缩检测（probe 未覆盖时的兜底）
+│   ├── speaker_diarization.py  # 分离执行与按时间轴分配说话人
+│   ├── speaker_resolver.py     # 簇 → 【身份姓名】映射、花名册解析、合并矛盾检测
+│   ├── probe.py                # 分离前人数预检（VAD+embedding+多 K 轮廓系数）
+│   └── collapse_check.py       # 塌缩检测（cam++ 在 3+ 人圆桌的系统性失败）
 ├── processor/
 │   ├── rules.py            # 编辑口径单一权威源（EDIT_*/STRUCT_* + RULES_SPEC_VERSION）
 │   ├── prompt.py           # 忠实校订与提要生成提示词（引用 rules 常量组装）
@@ -320,10 +389,11 @@ src/
 │   ├── llm_processor.py    # 并行分块校订、模型探测回退、校验、缓存与文稿整理
 │   ├── output_quality.py   # api 链路成品闸门（必填项与残留说话人标签）
 │   ├── session_edit.py     # 会话内校订：固定规范提示词 + 结构校验器 + CLI
-│   ├── glossary_inline.py  # 术语表三态判据（重复→删 / 可内联→挂到首次出现的观点 / 无关联→留）与确定性修复
+│   ├── glossary_inline.py  # 术语表三态判据与确定性内联/归位
+│   ├── bold_anchors.py     # 成稿转录区确定性回标加粗（不调 LLM）
 │   ├── rebuild_transcript.py  # 会话包保真重建原文转录（防过度删减）
 │   └── finish_phase_b.py   # Phase B 幂等续跑：扫描/生成缺失初稿/补来源行/校验报告/说话人画像
-└── renderer/markdown.py    # Markdown 渲染
+└── renderer/markdown.py    # Markdown 渲染（结构、标签与回标的唯一真值）
 ```
 
 ## 作者
@@ -333,5 +403,3 @@ src/
 ## 许可证
 
 MIT
-
-```

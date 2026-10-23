@@ -5,6 +5,7 @@ import pytest
 from src.config import LLMConfig
 from src.main import main, process_episode
 from src.models.schemas import EpisodeInfo, KeyPoint, OutputDoc, QuestionItem, TranscriptResult
+from src.utils import episode_stem
 
 
 def _episode():
@@ -85,7 +86,9 @@ def test_api_degraded_output_is_not_cached_as_final(tmp_path, monkeypatch, capsy
         audio,
         llm_config,
     )
-    output = tmp_path / "测试节目.degraded.md"
+    # 产物命名以 src.utils.episode_stem 为唯一事实源（<节目来源>-<本期节目名称>），
+    # 不要在测试里手写文件名——命名规则一改就会静默失配。
+    output = tmp_path / f"{episode_stem(episode.podcast_name, episode.title)}.degraded.md"
     assert output.is_file()
     assert "> [WARN] 分块 1 校订失败" in output.read_text(encoding="utf-8")
     assert "[WARN] 已产出降级文稿" in capsys.readouterr().out
